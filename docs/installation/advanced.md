@@ -45,8 +45,7 @@ Inside the interactive shell:
 7.  Type `w` to write the partition table.
 8.  Type 'Q' to quit.
 
-> [!NOTE]
-> Interactive mode in `fdisk` currently creates standard partitions. When using `boredos_install` later, you may need to specify the ESP device manually with `--esp-dev sda1` if it isn't automatically detected as an EFI System Partition.
+
 
 ### Step 2: Formatting
 Initialize the partitions with FAT32. Use the labels `EFI` and `BOREDOS` to match the expected system layout.
