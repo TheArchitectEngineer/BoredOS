@@ -415,25 +415,52 @@ static void decode_wallpapers_task(void *arg) {
         wp->name[(nl-4 < 63) ? nl-4 : 63] = 0;
 
         // Load and generate thumbnail
-        int fd = sys_open(wp->path, "r");
-        if (fd >= 0) {
-            int size = sys_seek(fd, 0, 2); // SEEK_END
-            sys_seek(fd, 0, 0); // SEEK_SET
-            if (size > 0 && size < 8 * 1024 * 1024) {
-                    unsigned char *buf = (unsigned char *)malloc(size);
-                    if (buf) {
-                        sys_read(fd, buf, size);
-                        int img_w, img_h, channels;
-                        unsigned char *img = stbi_load_from_memory(buf, size, &img_w, &img_h, &channels, 4);
-                        if (img && img_w > 0 && img_h > 0) {
-                            scale_rgba_to_argb(img, img_w, img_h, wp->thumb, WALLPAPER_THUMB_W, WALLPAPER_THUMB_H);
-                            wp->valid = 1;
-                            stbi_image_free(img);
+        char cache_path[256];
+        int cp = 0;
+        char *cpref = "/Library/Caches/Thumbnails/";
+        while (cpref[cp]) { cache_path[cp] = cpref[cp]; cp++; }
+        int cn = 0;
+        while (info[i].name[cn]) { cache_path[cp+cn] = info[i].name[cn]; cn++; }
+        char *csuf = ".bin";
+        int cs = 0;
+        while (csuf[cs]) { cache_path[cp+cn+cs] = csuf[cs]; cs++; }
+        cache_path[cp+cn+cs] = 0;
+
+        int cfd = sys_open(cache_path, "r");
+        if (cfd >= 0) {
+            sys_read(cfd, wp->thumb, WALLPAPER_THUMB_W * WALLPAPER_THUMB_H * 4);
+            sys_close(cfd);
+            wp->valid = 1;
+        } else {
+            int fd = sys_open(wp->path, "r");
+            if (fd >= 0) {
+                int size = sys_seek(fd, 0, 2); // SEEK_END
+                sys_seek(fd, 0, 0); // SEEK_SET
+                if (size > 0 && size < 8 * 1024 * 1024) {
+                        unsigned char *buf = (unsigned char *)malloc(size);
+                        if (buf) {
+                            sys_read(fd, buf, size);
+                            int img_w, img_h, channels;
+                            unsigned char *img = stbi_load_from_memory(buf, size, &img_w, &img_h, &channels, 4);
+                            if (img && img_w > 0 && img_h > 0) {
+                                scale_rgba_to_argb(img, img_w, img_h, wp->thumb, WALLPAPER_THUMB_W, WALLPAPER_THUMB_H);
+                                wp->valid = 1;
+                                stbi_image_free(img);
+
+                                // Save to cache
+                                sys_mkdir("/Library/Caches");
+                                sys_mkdir("/Library/Caches/Thumbnails");
+                                int swfd = sys_open(cache_path, "w");
+                                if (swfd >= 0) {
+                                    sys_write_fs(swfd, wp->thumb, WALLPAPER_THUMB_W * WALLPAPER_THUMB_H * 4);
+                                    sys_close(swfd);
+                                }
+                            }
+                            free(buf);
                         }
-                        free(buf); // Release memory
-                    }
+                }
+                sys_close(fd);
             }
-            sys_close(fd);
         }
 
         wallpaper_count++;
@@ -624,11 +651,7 @@ static void control_panel_paint_wallpaper(ui_window_t win) {
         
         widget_button_draw(&settings_ctx, &btn_wp_thumbs[i]);
         if (wallpapers[i].valid) {
-            for (int py = 0; py < WALLPAPER_THUMB_H; py++) {
-                for (int px = 0; px < WALLPAPER_THUMB_W; px++) {
-                    ui_draw_rect(win, button_x + tx + 4 + px, button_y + ty + 4 + py, 1, 1, wallpapers[i].thumb[py * WALLPAPER_THUMB_W + px]);
-                }
-            }
+            ui_draw_image(win, button_x + tx + 4, button_y + ty + 4, WALLPAPER_THUMB_W, WALLPAPER_THUMB_H, wallpapers[i].thumb);
         }
         ui_draw_string(win, button_x + tx + 8, button_y + ty + WALLPAPER_THUMB_H + 8, wallpapers[i].name, 0xFFFFFFFF);
     }
