@@ -248,6 +248,7 @@ $(BUILD_DIR)/initrd.tar: $(KERNEL_ELF)
 	@cp $(SRC_DIR)/userland/libc/sys/*.h $(BUILD_DIR)/initrd/usr/include/sys/
 	@cp $(SRC_DIR)/userland/libc/*.h $(BUILD_DIR)/initrd/usr/include/libc/
 	@cp $(SRC_DIR)/userland/libc/*.h $(BUILD_DIR)/initrd/usr/local/include/
+	@cp $(SRC_DIR)/userland/stb_image.h $(BUILD_DIR)/initrd/usr/include/
 
 	@printf "$(YELLOW)[COPY]$(RESET) Wallpapers..."
 	@for f in $(SRC_DIR)/images/wallpapers/*; do \
@@ -327,7 +328,6 @@ $(BUILD_DIR)/initrd.tar: $(KERNEL_ELF)
 	@if [ -f README.md ]; then printf "  -> README.md"; cp README.md $(BUILD_DIR)/initrd/; fi
 	@if [ -f LICENSE ]; then printf "  -> LICENSE"; cp LICENSE $(BUILD_DIR)/initrd/; fi
 	@if [ -f limine.conf ]; then printf "  -> limine.conf"; cp limine.conf $(BUILD_DIR)/initrd/; fi
-	@if [ -f $(SRC_DIR)/userland/gui/about.c ]; then printf "  -> about.c"; cp $(SRC_DIR)/userland/gui/about.c $(BUILD_DIR)/initrd/; fi
 	
 	@printf "$(YELLOW)[TAR]$(RESET) Creating initrd.tar..."
 	cd $(BUILD_DIR)/initrd && COPYFILE_DISABLE=1 tar --exclude="._*" -cf ../initrd.tar *
