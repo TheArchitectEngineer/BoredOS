@@ -109,9 +109,9 @@
   <td align="center">
     <a href="https://github.com/naplon74">
       <img src="https://github.com/naplon74.png?size=80" width="60" /><br />
-      <sub><b>Artwork</b></sub>
+      <sub><b>Naplon74</b></sub>
     </a><br />
-    Contributor
+    Artwork
   </td>
 </tr>
 </table>
