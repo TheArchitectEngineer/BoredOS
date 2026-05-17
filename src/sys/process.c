@@ -13,6 +13,7 @@
 #include "spinlock.h"
 #include "smp.h"
 #include "lapic.h"
+#include "unix_socket.h"
 #include "../core/kutils.h"
 
 
@@ -85,11 +86,58 @@ static void process_close_fd_inner(process_t *proc, int fd) {
                 kfree(pipe);
             }
         }
+    } else if (proc->fd_kind[fd] == PROC_FD_KIND_SOCKET) {
+        process_socket_release((process_fd_socket_t *)proc->fds[fd]);
     }
 
     proc->fds[fd] = NULL;
     proc->fd_kind[fd] = PROC_FD_KIND_NONE;
     proc->fd_flags[fd] = 0;
+}
+
+static void process_socket_drop_pipes(process_fd_socket_t *sock) {
+    if (!sock) return;
+    if (sock->rx_pipe) {
+        process_fd_pipe_t *pipe = sock->rx_pipe;
+        pipe->readers--;
+        if (pipe->readers <= 0 && pipe->writers <= 0) {
+            kfree(pipe);
+        }
+        sock->rx_pipe = NULL;
+    }
+    if (sock->tx_pipe) {
+        process_fd_pipe_t *pipe = sock->tx_pipe;
+        pipe->writers--;
+        if (pipe->readers <= 0 && pipe->writers <= 0) {
+            kfree(pipe);
+        }
+        sock->tx_pipe = NULL;
+    }
+}
+
+process_fd_socket_t *process_socket_create(void) {
+    process_fd_socket_t *sock = (process_fd_socket_t *)kmalloc(sizeof(*sock));
+    if (!sock) return NULL;
+    memset(sock, 0, sizeof(*sock));
+    sock->refs = 1;
+    return sock;
+}
+
+void process_socket_addref(process_fd_socket_t *sock) {
+    if (!sock) return;
+    sock->refs++;
+}
+
+void process_socket_release(process_fd_socket_t *sock) {
+    if (!sock) return;
+    sock->refs--;
+    if (sock->refs > 0) return;
+
+    if (sock->is_bound && sock->path[0]) {
+        unix_unregister_listener(sock->path);
+    }
+    process_socket_drop_pipes(sock);
+    kfree(sock);
 }
 
 static void process_init_signal_state(process_t *proc) {
@@ -326,6 +374,8 @@ process_t* process_create_elf(const char* filepath, const char* args_str, bool t
                 } else if (new_proc->fd_kind[i] == PROC_FD_KIND_PIPE_WRITE) {
                     process_fd_pipe_t *pipe = (process_fd_pipe_t *)new_proc->fds[i];
                     if (pipe) pipe->writers++;
+                } else if (new_proc->fd_kind[i] == PROC_FD_KIND_SOCKET) {
+                    process_socket_addref((process_fd_socket_t *)new_proc->fds[i]);
                 }
             }
         }

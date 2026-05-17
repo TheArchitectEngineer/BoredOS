@@ -19,6 +19,7 @@
 #define PROC_FD_KIND_PIPE_READ 2
 #define PROC_FD_KIND_PIPE_WRITE 3
 #define PROC_FD_KIND_TTY 4
+#define PROC_FD_KIND_SOCKET 5
 
 typedef struct {
     void *file;
@@ -37,6 +38,20 @@ typedef struct {
     wait_queue_head_t read_queue;
     wait_queue_head_t write_queue;
 } process_fd_pipe_t;
+
+typedef struct {
+    int refs;
+    uint8_t is_bound;
+    uint8_t is_listening;
+    uint8_t is_connected;
+    char path[108];
+    process_fd_pipe_t *rx_pipe;
+    process_fd_pipe_t *tx_pipe;
+} process_fd_socket_t;
+
+process_fd_socket_t *process_socket_create(void);
+void process_socket_addref(process_fd_socket_t *sock);
+void process_socket_release(process_fd_socket_t *sock);
 
 struct FAT32_FileHandle;
 

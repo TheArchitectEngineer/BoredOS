@@ -58,6 +58,9 @@
 #include "lwip/inet_chksum.h"
 #endif
 
+#include <errno.h>
+#include <limits.h>
+
 #if LWIP_COMPAT_SOCKETS == 2 && LWIP_POSIX_SOCKETS_IO_NAMES
 #include <stdarg.h>
 #endif

@@ -1,9 +1,11 @@
 #ifndef LWIPOPTS_H
 #define LWIPOPTS_H
 
-#define NO_SYS                     1
-#define LWIP_SOCKET                0
-#define LWIP_NETCONN               0
+#define NO_SYS                     0
+#define LWIP_SOCKET                1
+#define LWIP_NETCONN               1
+
+#define LWIP_PROVIDE_ERRNO         1
 
 #define LWIP_ARP                   1
 #define LWIP_ETHERNET              1
@@ -15,6 +17,8 @@
 #define LWIP_DHCP                  1
 #define LWIP_DNS                   1
 #define LWIP_IGMP                  0
+#define LWIP_COMPAT_SOCKETS        1
+#define LWIP_POSIX_SOCKETS_IO_NAMES 1
 
 #define LWIP_NETIF_HOSTNAME        1
 #define LWIP_NETIF_STATUS_CALLBACK 1

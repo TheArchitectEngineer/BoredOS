@@ -28,6 +28,7 @@
 #include "app_metadata.h"
 #include "disk.h"
 #include "mkfs_fat32.h"
+#include "unix_socket.h"
 
 #define SYSTEM_CMD_DISK_GET_COUNT  100
 #define SYSTEM_CMD_DISK_GET_INFO   101
@@ -122,6 +123,18 @@ typedef struct {
 
 typedef uint64_t (*syscall_handler_fn)(const syscall_args_t *args);
 
+static process_fd_pipe_t *fs_create_pipe_state(void);
+static void fs_pipe_drop_reader(process_fd_pipe_t *pipe);
+static void fs_pipe_drop_writer(process_fd_pipe_t *pipe);
+static int fs_copy_unix_path(const void *addr, uint64_t addrlen, char *path_out, size_t path_out_size);
+static uint64_t fs_cmd_unix_socket_create(const syscall_args_t *args);
+static uint64_t fs_cmd_unix_socket_bind(const syscall_args_t *args);
+static uint64_t fs_cmd_unix_socket_listen(const syscall_args_t *args);
+static uint64_t fs_cmd_unix_socket_accept(const syscall_args_t *args);
+static uint64_t fs_cmd_unix_socket_connect(const syscall_args_t *args);
+static uint64_t fs_cmd_unix_socket_close(const syscall_args_t *args);
+static uint64_t fs_cmd_unix_socket_unlink(const syscall_args_t *args);
+
 #define O_RDONLY 0x0000
 #define O_WRONLY 0x0001
 #define O_RDWR   0x0002
@@ -149,6 +162,234 @@ static int fs_mode_to_flags(const char *mode) {
         return (mode[1] == '+') ? O_RDWR : O_WRONLY;
     }
     return O_RDONLY;
+}
+
+static process_fd_pipe_t *fs_create_pipe_state(void) {
+    process_fd_pipe_t *pipe = (process_fd_pipe_t *)kmalloc(sizeof(process_fd_pipe_t));
+    if (!pipe) return NULL;
+    memset(pipe, 0, sizeof(*pipe));
+    pipe->readers = 1;
+    pipe->writers = 1;
+    wait_queue_init(&pipe->read_queue);
+    wait_queue_init(&pipe->write_queue);
+    return pipe;
+}
+
+static void fs_pipe_drop_reader(process_fd_pipe_t *pipe) {
+    if (!pipe) return;
+    pipe->readers--;
+    if (pipe->readers <= 0 && pipe->writers <= 0) {
+        kfree(pipe);
+    }
+}
+
+static void fs_pipe_drop_writer(process_fd_pipe_t *pipe) {
+    if (!pipe) return;
+    pipe->writers--;
+    if (pipe->readers <= 0 && pipe->writers <= 0) {
+        kfree(pipe);
+    }
+}
+
+static int fs_copy_unix_path(const void *addr, uint64_t addrlen, char *path_out, size_t path_out_size) {
+    const uint8_t *raw = (const uint8_t *)addr;
+    size_t i;
+
+    if (!addr || !path_out || path_out_size == 0 || addrlen < sizeof(uint16_t)) {
+        return -1;
+    }
+    if (*(const uint16_t *)addr != 1) {
+        return -1;
+    }
+
+    raw += sizeof(uint16_t);
+    for (i = 0; i + 1 < path_out_size && (i + sizeof(uint16_t)) < addrlen; i++) {
+        path_out[i] = (char)raw[i];
+        if (path_out[i] == '\0') break;
+    }
+    path_out[path_out_size - 1] = '\0';
+    return path_out[0] ? 0 : -1;
+}
+
+static void fs_socket_put_pipes(process_fd_socket_t *sock) {
+    if (!sock) return;
+    if (sock->rx_pipe) {
+        fs_pipe_drop_reader(sock->rx_pipe);
+        sock->rx_pipe = NULL;
+    }
+    if (sock->tx_pipe) {
+        fs_pipe_drop_writer(sock->tx_pipe);
+        sock->tx_pipe = NULL;
+    }
+    sock->is_connected = 0;
+}
+
+static uint64_t fs_cmd_unix_socket_create(const syscall_args_t *args) {
+    process_t *proc = process_get_current();
+    int domain = (int)args->arg2;
+    int type = (int)args->arg3;
+    int protocol = (int)args->arg4;
+
+    if (!proc || domain != 1 || type != 1 || protocol != 0) return -1;
+
+    int fd = fs_alloc_fd_slot(proc, 0);
+    if (fd < 0) return -1;
+
+    process_fd_socket_t *sock = process_socket_create();
+    if (!sock) return -1;
+
+    proc->fds[fd] = sock;
+    proc->fd_kind[fd] = PROC_FD_KIND_SOCKET;
+    proc->fd_flags[fd] = O_RDWR;
+    return fd;
+}
+
+static uint64_t fs_cmd_unix_socket_bind(const syscall_args_t *args) {
+    process_t *proc = process_get_current();
+    int fd = (int)args->arg2;
+    const void *addr = (const void *)args->arg3;
+    uint64_t addrlen = args->arg4;
+    char path[108];
+
+    if (!proc || fd < 0 || fd >= MAX_PROCESS_FDS || !proc->fds[fd] || proc->fd_kind[fd] != PROC_FD_KIND_SOCKET) return -1;
+    if (fs_copy_unix_path(addr, addrlen, path, sizeof(path)) < 0) return -1;
+
+    if (unix_register_listener(path, proc->pid, fd) < 0) return -1;
+
+    process_fd_socket_t *sock = (process_fd_socket_t *)proc->fds[fd];
+    sock->is_bound = 1;
+    sock->is_listening = 0;
+    sock->is_connected = 0;
+    strncpy(sock->path, path, sizeof(sock->path) - 1);
+    return 0;
+}
+
+static uint64_t fs_cmd_unix_socket_listen(const syscall_args_t *args) {
+    process_t *proc = process_get_current();
+    int fd = (int)args->arg2;
+    (void)args;
+
+    if (!proc || fd < 0 || fd >= MAX_PROCESS_FDS || !proc->fds[fd] || proc->fd_kind[fd] != PROC_FD_KIND_SOCKET) return -1;
+
+    process_fd_socket_t *sock = (process_fd_socket_t *)proc->fds[fd];
+    if (!sock || !sock->is_bound) return -1;
+
+    unix_listener_t *lst = unix_find_listener_by_owner(proc->pid, fd);
+    if (!lst) return -1;
+
+    unix_listener_set_listening(lst, 1);
+    sock->is_listening = 1;
+    return 0;
+}
+
+static uint64_t fs_cmd_unix_socket_connect(const syscall_args_t *args) {
+    process_t *proc = process_get_current();
+    int fd = (int)args->arg2;
+    const void *addr = (const void *)args->arg3;
+    uint64_t addrlen = args->arg4;
+    char path[108];
+    process_fd_socket_t *sock;
+    unix_listener_t *lst;
+    process_fd_pipe_t *c2s;
+    process_fd_pipe_t *s2c;
+    unix_pending_conn_t *pc;
+
+    if (!proc || fd < 0 || fd >= MAX_PROCESS_FDS || !proc->fds[fd] || proc->fd_kind[fd] != PROC_FD_KIND_SOCKET) return -1;
+    sock = (process_fd_socket_t *)proc->fds[fd];
+    if (!sock || sock->is_connected) return -1;
+    if (fs_copy_unix_path(addr, addrlen, path, sizeof(path)) < 0) return -1;
+
+    lst = unix_find_listener(path);
+    if (!lst || !unix_listener_is_listening(lst)) return -1;
+
+    c2s = fs_create_pipe_state();
+    s2c = fs_create_pipe_state();
+    if (!c2s || !s2c) {
+        if (c2s) kfree(c2s);
+        if (s2c) kfree(s2c);
+        return -1;
+    }
+
+    sock->rx_pipe = s2c;
+    sock->tx_pipe = c2s;
+    sock->is_connected = 1;
+
+    pc = unix_create_pending_conn(c2s, s2c, proc->pid, fd);
+    if (!pc) {
+        fs_socket_put_pipes(sock);
+        return -1;
+    }
+
+    if (unix_enqueue_pending(lst, pc) < 0) {
+        unix_free_pending(pc);
+        fs_socket_put_pipes(sock);
+        return -1;
+    }
+
+    return 0;
+}
+
+static uint64_t fs_cmd_unix_socket_accept(const syscall_args_t *args) {
+    process_t *proc = process_get_current();
+    int fd = (int)args->arg2;
+    void *addr = (void *)args->arg3;
+    uint64_t *addrlen = (uint64_t *)args->arg4;
+    process_fd_socket_t *sock;
+    unix_listener_t *lst;
+    unix_pending_conn_t *pc;
+    int newfd;
+
+    if (!proc || fd < 0 || fd >= MAX_PROCESS_FDS || !proc->fds[fd] || proc->fd_kind[fd] != PROC_FD_KIND_SOCKET) return -1;
+    sock = (process_fd_socket_t *)proc->fds[fd];
+    if (!sock || !sock->is_listening) return -1;
+
+    lst = unix_find_listener_by_owner(proc->pid, fd);
+    if (!lst || !unix_listener_is_listening(lst)) return -1;
+
+    pc = unix_dequeue_pending(lst);
+    if (!pc) return -2;
+
+    newfd = fs_alloc_fd_slot(proc, 0);
+    if (newfd < 0) {
+        unix_enqueue_pending(lst, pc);
+        return -1;
+    }
+
+    process_fd_socket_t *child = process_socket_create();
+    if (!child) {
+        unix_enqueue_pending(lst, pc);
+        return -1;
+    }
+
+    child->rx_pipe = (process_fd_pipe_t *)pc->pipe1;
+    child->tx_pipe = (process_fd_pipe_t *)pc->pipe2;
+    child->is_connected = 1;
+    proc->fds[newfd] = child;
+    proc->fd_kind[newfd] = PROC_FD_KIND_SOCKET;
+    proc->fd_flags[newfd] = O_RDWR;
+
+    unix_free_pending(pc);
+    return newfd;
+}
+
+static uint64_t fs_cmd_unix_socket_close(const syscall_args_t *args) {
+    process_t *proc = process_get_current();
+    int fd = (int)args->arg2;
+    if (!proc || fd < 0 || fd >= MAX_PROCESS_FDS || !proc->fds[fd]) return -1;
+    if (proc->fd_kind[fd] == PROC_FD_KIND_SOCKET) {
+        process_socket_release((process_fd_socket_t *)proc->fds[fd]);
+        proc->fds[fd] = NULL;
+        proc->fd_kind[fd] = PROC_FD_KIND_NONE;
+        proc->fd_flags[fd] = 0;
+        return 0;
+    }
+    return -1;
+}
+
+static uint64_t fs_cmd_unix_socket_unlink(const syscall_args_t *args) {
+    const char *path = (const char *)args->arg2;
+    if (!path) return -1;
+    return unix_unregister_listener(path);
 }
 
 static uint64_t fs_cmd_open(const syscall_args_t *args) {
@@ -226,6 +467,31 @@ static uint64_t fs_cmd_read(const syscall_args_t *args) {
         return n;
     }
 
+    if (proc->fd_kind[fd] == PROC_FD_KIND_SOCKET) {
+        process_fd_socket_t *sock = (process_fd_socket_t *)proc->fds[fd];
+        process_fd_pipe_t *pipe = sock ? sock->rx_pipe : NULL;
+        if (!sock || !pipe || !buf) return -1;
+        uint8_t *out = (uint8_t *)buf;
+        uint32_t n = 0;
+        while (n < len) {
+            if (pipe->count == 0) {
+                if (pipe->writers == 0) break;
+                if (proc->fd_flags[fd] & O_NONBLOCK) {
+                    if (n == 0) return (uint64_t)-1;
+                    break;
+                }
+                break;
+            }
+            out[n++] = pipe->data[pipe->read_pos];
+            pipe->read_pos = (pipe->read_pos + 1) % sizeof(pipe->data);
+            pipe->count--;
+        }
+        if (n > 0) {
+            wait_queue_wake_all(&pipe->write_queue);
+        }
+        return n;
+    }
+
 
 
     return -1;
@@ -248,6 +514,30 @@ static uint64_t fs_cmd_write(const syscall_args_t *args) {
         process_fd_pipe_t *pipe = (process_fd_pipe_t *)proc->fds[fd];
         if (!pipe || !buf) return -1;
         if (pipe->readers <= 0) return (uint64_t)-1;
+        const uint8_t *in = (const uint8_t *)buf;
+        uint32_t n = 0;
+        while (n < len) {
+            if (pipe->count == sizeof(pipe->data)) {
+                if (proc->fd_flags[fd] & O_NONBLOCK) {
+                    if (n == 0) return (uint64_t)-1;
+                    break;
+                }
+                break;
+            }
+            pipe->data[pipe->write_pos] = in[n++];
+            pipe->write_pos = (pipe->write_pos + 1) % sizeof(pipe->data);
+            pipe->count++;
+        }
+        if (n > 0) {
+            wait_queue_wake_all(&pipe->read_queue);
+        }
+        return n;
+    }
+
+    if (proc->fd_kind[fd] == PROC_FD_KIND_SOCKET) {
+        process_fd_socket_t *sock = (process_fd_socket_t *)proc->fds[fd];
+        process_fd_pipe_t *pipe = sock ? sock->tx_pipe : NULL;
+        if (!sock || !pipe || !buf) return -1;
         const uint8_t *in = (const uint8_t *)buf;
         uint32_t n = 0;
         while (n < len) {
@@ -296,6 +586,8 @@ static uint64_t fs_cmd_close(const syscall_args_t *args) {
                 kfree(pipe);
             }
         }
+    } else if (proc->fd_kind[fd] == PROC_FD_KIND_SOCKET) {
+        process_socket_release((process_fd_socket_t *)proc->fds[fd]);
     }
 
     proc->fds[fd] = NULL;
@@ -365,6 +657,8 @@ static uint64_t fs_cmd_dup(const syscall_args_t *args) {
     } else if (proc->fd_kind[oldfd] == PROC_FD_KIND_PIPE_WRITE) {
         process_fd_pipe_t *pipe = (process_fd_pipe_t *)proc->fds[oldfd];
         if (pipe) pipe->writers++;
+    } else if (proc->fd_kind[oldfd] == PROC_FD_KIND_SOCKET) {
+        process_socket_addref((process_fd_socket_t *)proc->fds[oldfd]);
     }
 
     return (uint64_t)newfd;
@@ -397,6 +691,8 @@ static uint64_t fs_cmd_dup2(const syscall_args_t *args) {
     } else if (proc->fd_kind[oldfd] == PROC_FD_KIND_PIPE_WRITE) {
         process_fd_pipe_t *pipe = (process_fd_pipe_t *)proc->fds[oldfd];
         if (pipe) pipe->writers++;
+    } else if (proc->fd_kind[oldfd] == PROC_FD_KIND_SOCKET) {
+        process_socket_addref((process_fd_socket_t *)proc->fds[oldfd]);
     }
 
     return (uint64_t)newfd;
@@ -412,13 +708,8 @@ static uint64_t fs_cmd_pipe(const syscall_args_t *args) {
     int wfd = fs_alloc_fd_slot(proc, rfd + 1);
     if (wfd < 0) return -1;
 
-    process_fd_pipe_t *pipe = (process_fd_pipe_t *)kmalloc(sizeof(process_fd_pipe_t));
+    process_fd_pipe_t *pipe = fs_create_pipe_state();
     if (!pipe) return -1;
-    memset(pipe, 0, sizeof(*pipe));
-    pipe->readers = 1;
-    pipe->writers = 1;
-    wait_queue_init(&pipe->read_queue);
-    wait_queue_init(&pipe->write_queue);
 
     proc->fds[rfd] = pipe;
     proc->fd_kind[rfd] = PROC_FD_KIND_PIPE_READ;
@@ -492,7 +783,8 @@ static uint64_t fs_cmd_delete(const syscall_args_t *args) {
     if (vfs_is_directory(normalized)) {
         return vfs_rmdir(normalized) ? 0 : -1;
     }
-    return vfs_delete(normalized) ? 0 : -1;
+    if (vfs_delete(normalized)) return 0;
+    return unix_unregister_listener(normalized);
 }
 
 static uint64_t fs_cmd_get_info(const syscall_args_t *args) {
@@ -644,6 +936,16 @@ static uint64_t fs_cmd_poll(const syscall_args_t *args) {
                 if (pipe->count < sizeof(pipe->data)) mask |= POLLOUT;
                 if (pipe->readers == 0) mask |= POLLERR;
             }
+        } else if (proc->fd_kind[fd] == PROC_FD_KIND_SOCKET) {
+            process_fd_socket_t *sock = (process_fd_socket_t *)proc->fds[fd];
+            if (sock && sock->rx_pipe && sock->tx_pipe) {
+                if (pt->qproc) pt->qproc(&sock->rx_pipe->read_queue, pt);
+                if (pt->qproc) pt->qproc(&sock->tx_pipe->write_queue, pt);
+                if (sock->rx_pipe->count > 0) mask |= POLLIN;
+                if (sock->tx_pipe->count < sizeof(sock->tx_pipe->data)) mask |= POLLOUT;
+                if (sock->rx_pipe->writers == 0) mask |= POLLHUP;
+                if (sock->tx_pipe->readers == 0) mask |= POLLERR;
+            }
         } else if (proc->fd_kind[fd] == PROC_FD_KIND_TTY) {
             extern int tty_poll(int tty_id, struct poll_table *pt);
             mask = tty_poll(proc->tty_id, pt);
@@ -695,7 +997,7 @@ static uint64_t fs_cmd_ioctl(const syscall_args_t *args) {
     return -1;
 }
 
-#define FS_CMD_TABLE_SIZE 25
+#define FS_CMD_TABLE_SIZE 34
 static const syscall_handler_fn fs_cmd_table[FS_CMD_TABLE_SIZE] = {
     [FS_CMD_OPEN]        = fs_cmd_open,      // 1
     [FS_CMD_READ]        = fs_cmd_read,      // 2
@@ -721,6 +1023,13 @@ static const syscall_handler_fn fs_cmd_table[FS_CMD_TABLE_SIZE] = {
     [FS_CMD_POLL]        = fs_cmd_poll,        // 22
     [FS_CMD_SELECT]      = fs_cmd_select,      // 23
     [FS_CMD_IOCTL]       = fs_cmd_ioctl,       // 24
+    [FS_CMD_UNIX_SOCKET_CREATE] = fs_cmd_unix_socket_create,
+    [FS_CMD_UNIX_SOCKET_BIND]   = fs_cmd_unix_socket_bind,
+    [FS_CMD_UNIX_SOCKET_LISTEN] = fs_cmd_unix_socket_listen,
+    [FS_CMD_UNIX_SOCKET_ACCEPT] = fs_cmd_unix_socket_accept,
+    [FS_CMD_UNIX_SOCKET_CONNECT] = fs_cmd_unix_socket_connect,
+    [FS_CMD_UNIX_SOCKET_CLOSE]  = fs_cmd_unix_socket_close,
+    [FS_CMD_UNIX_SOCKET_UNLINK] = fs_cmd_unix_socket_unlink,
 };
 
 static uint64_t sys_cmd_set_bg_color(const syscall_args_t *args) {
