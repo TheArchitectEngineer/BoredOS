@@ -442,8 +442,16 @@ void kmain(void) {
             serial_write_hex(mod->size);
             serial_write(" bytes)\n");
             
-            if (path_len >= 5 && path[path_len-4] == '.' && path[path_len-3] == 't' && 
-                path[path_len-2] == 'a' && path[path_len-1] == 'r') {
+            bool is_tar = (path_len >= 4 && 
+                           path[path_len-4] == '.' && path[path_len-3] == 't' && 
+                           path[path_len-2] == 'a' && path[path_len-1] == 'r');
+            bool is_lz4 = (path_len >= 8 && 
+                           path[path_len-8] == '.' && path[path_len-7] == 't' && 
+                           path[path_len-6] == 'a' && path[path_len-5] == 'r' && 
+                           path[path_len-4] == '.' && path[path_len-3] == 'l' && 
+                           path[path_len-2] == 'z' && path[path_len-1] == '4');
+
+            if (is_tar || is_lz4) {
                 g_bootfs_state.initrd_size = mod->size;
                 g_bootfs_state.initrd_ptr = mod->address;
                 serial_write("[INIT] -> Initrd detected\n");
@@ -467,11 +475,68 @@ void kmain(void) {
             int len = 0;
             while(clean_path[len]) len++;
             
-            if (len >= 4 && clean_path[len-4] == '.' && clean_path[len-3] == 't' && clean_path[len-2] == 'a' && clean_path[len-1] == 'r') {
-                serial_write("[INIT] Parsing TAR initrd: ");
+            bool is_tar = (len >= 4 && 
+                           clean_path[len-4] == '.' && clean_path[len-3] == 't' && 
+                           clean_path[len-2] == 'a' && clean_path[len-1] == 'r');
+            bool is_lz4 = (len >= 8 && 
+                           clean_path[len-8] == '.' && clean_path[len-7] == 't' && 
+                           clean_path[len-6] == 'a' && clean_path[len-5] == 'r' && 
+                           clean_path[len-4] == '.' && clean_path[len-3] == 'l' && 
+                           clean_path[len-2] == 'z' && clean_path[len-1] == '4');
+
+            if (is_tar || is_lz4) {
+                serial_write("[INIT] Parsing initrd: ");
                 serial_write(clean_path);
                 serial_write("\n");
-                tar_parse(mod->address, mod->size);
+                
+                if (is_lz4) {
+                    uint8_t *src = (uint8_t *)mod->address;
+                    uint8_t flg = src[4];
+                    uint64_t uncomp_size = 0;
+                    if (flg & 0x08) {
+                        uncomp_size = src[6] | (src[7] << 8) | (src[8] << 16) | (src[9] << 24) |
+                                      ((uint64_t)src[10] << 32) | ((uint64_t)src[11] << 40) |
+                                      ((uint64_t)src[12] << 48) | ((uint64_t)src[13] << 56);
+                    }
+                    if (uncomp_size == 0) {
+                        uncomp_size = 128 * 1024 * 1024; 
+                    }
+                    
+                    serial_write("[INIT] Decompressing LZ4 initrd (uncompressed size: ");
+                    serial_write_hex(uncomp_size);
+                    serial_write(" bytes)...\n");
+                    
+                    uint8_t *decomp_buf = (uint8_t *)kmalloc(uncomp_size);
+                    if (!decomp_buf) {
+                        serial_write("[INIT] ERROR: Failed to allocate decompression buffer!\n");
+                        hcf();
+                    }
+                    
+                    extern int lz4_decompress_frame(const uint8_t *src, int src_len, uint8_t *dst, int dst_len);
+                    int decomp_size = lz4_decompress_frame(mod->address, mod->size, decomp_buf, uncomp_size);
+                    if (decomp_size < 0) {
+                        serial_write("[INIT] ERROR: LZ4 decompression failed!\n");
+                        hcf();
+                    }
+                    
+                    serial_write("[INIT] Decompression successful! Parsing TAR...\n");
+                    
+                    uint8_t *shrunk_buf = (uint8_t *)krealloc(decomp_buf, decomp_size);
+                    if (shrunk_buf) {
+                        decomp_buf = shrunk_buf;
+                    }
+                    
+                    tar_parse(decomp_buf, decomp_size);
+                    
+                    kfree(decomp_buf);
+                    
+                    g_bootfs_state.initrd_ptr = NULL;
+                    g_bootfs_state.initrd_size = 0;
+                } else {
+                    tar_parse(mod->address, mod->size);
+                    g_bootfs_state.initrd_ptr = mod->address;
+                    g_bootfs_state.initrd_size = mod->size;
+                }
             } else {
                 char dir_path[256];
                 int last_slash = -1;

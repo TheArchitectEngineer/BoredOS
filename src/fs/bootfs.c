@@ -87,9 +87,12 @@ void bootfs_register_file(const char *name, void *data, uint32_t size) {
         f->next = (bootfs_custom_file_t*)g_bootfs_state.custom_files;
         g_bootfs_state.custom_files = f;
     }
-    f->data = (uint8_t*)data;
+    f->data = (uint8_t*)kmalloc(size);
+    if (f->data) {
+        memcpy(f->data, data, size);
+    }
     f->size = size;
-    f->capacity = 0;
+    f->capacity = size;
 }
 
 static bool is_metadata_path(const char *path) {

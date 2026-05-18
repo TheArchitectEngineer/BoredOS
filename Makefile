@@ -268,7 +268,12 @@ $(BUILD_DIR)/initrd.tar: $(KERNEL_ELF) userland
 	cd $(BUILD_DIR)/initrd && COPYFILE_DISABLE=1 tar --exclude="._*" -cf ../initrd.tar *
 	@printf "$(GREEN)[OK]$(RESET) Initrd created: $(BUILD_DIR)/initrd.tar\n"
 
-$(ISO_IMAGE): $(KERNEL_ELF) $(BUILD_DIR)/initrd.tar limine.conf limine-setup
+$(BUILD_DIR)/initrd.tar.lz4: $(BUILD_DIR)/initrd.tar
+	@printf "$(YELLOW)[LZ4]$(RESET) Compressing initrd.tar...\n"
+	lz4 -f -9 --content-size $(BUILD_DIR)/initrd.tar $(BUILD_DIR)/initrd.tar.lz4
+	@printf "$(GREEN)[OK]$(RESET) LZ4 compressed initrd created: $(BUILD_DIR)/initrd.tar.lz4\n"
+
+$(ISO_IMAGE): $(KERNEL_ELF) $(BUILD_DIR)/initrd.tar.lz4 limine.conf limine-setup
 	$(call PRINT_STEP,CREATING ISO IMAGE)
 	@printf "$(YELLOW)[ISO]$(RESET) Cleaning previous ISO root...\n"
 	rm -rf $(ISO_DIR)
@@ -284,10 +289,10 @@ $(ISO_IMAGE): $(KERNEL_ELF) $(BUILD_DIR)/initrd.tar limine.conf limine-setup
 	cp limine.conf $(ISO_DIR)/
 	
 	@printf "$(YELLOW)[COPY]$(RESET) Initrd...\n"
-	cp $(BUILD_DIR)/initrd.tar $(ISO_DIR)/
+	cp $(BUILD_DIR)/initrd.tar.lz4 $(ISO_DIR)/
 
 	@printf "$(YELLOW)[CONFIG]$(RESET) Adding initrd module path...\n"
-	printf "    module_path: boot():/initrd.tar\n" >> $(ISO_DIR)/limine.conf
+	printf "    module_path: boot():/initrd.tar.lz4\n" >> $(ISO_DIR)/limine.conf
 	
 	@printf "$(YELLOW)[COPY]$(RESET) Optional splash image...\n"
 	@if [ -f branding/splash.jpg ]; then printf "  -> splash.jpg\n"; cp branding/splash.jpg $(ISO_DIR)/splash.jpg; else printf "  -> no splash.jpg found\n"; fi
