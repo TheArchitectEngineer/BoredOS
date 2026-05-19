@@ -43,6 +43,10 @@ struct BoredOSSysdepTags :
     Unlinkat,
     Stat,
     Access,
+    Tcgetattr,
+    Tcsetattr,
+    Tcgetwinsize,
+    Tcsetwinsize,
     // --- Process ---
     Fork,
     Execve,

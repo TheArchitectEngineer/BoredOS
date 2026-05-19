@@ -16,6 +16,7 @@
 #include <stddef.h>
 #include <abi-bits/seek-whence.h>
 #include <abi-bits/vm-flags.h>
+#include <termios.h>
 
 // ---------------------------------------------------------------------------
 // BoredOS syscall numbers (must match src/sys/syscall.h)
@@ -47,6 +48,7 @@
 #define FS_CMD_PIPE   17
 #define FS_CMD_FCNTL  18
 #define FS_CMD_IOCTL  24
+#define FS_CMD_POLL   22
 
 // System sub-commands
 #define SYSTEM_CMD_RTC_GET    11
@@ -137,6 +139,28 @@ struct bored_rtc {
 // ---------------------------------------------------------------------------
 namespace mlibc {
 
+static struct termios g_tty_termios = []() {
+    struct termios t;
+    __builtin_memset(&t, 0, sizeof(t));
+    t.c_iflag = ICRNL | IXON;
+    t.c_oflag = OPOST | ONLCR;
+    t.c_cflag = CS8 | CREAD;
+    t.c_lflag = ISIG | ICANON | ECHO | ECHOE | ECHOK;
+    t.c_cc[VMIN] = 1;
+    t.c_cc[VTIME] = 0;
+    t.c_cc[VINTR] = 3;   // Ctrl+C
+    t.c_cc[VQUIT] = 28;  // Ctrl+Backslash
+    t.c_cc[VEOF] = 4;    // Ctrl+D
+    t.c_cc[VSTART] = 17; // Ctrl+Q
+    t.c_cc[VSTOP] = 19;  // Ctrl+S
+    t.c_cc[VSUSP] = 26;  // Ctrl+Z
+    return t;
+}();
+
+static char g_canon_buffer[2048];
+static size_t g_canon_head = 0;
+static size_t g_canon_tail = 0;
+
 extern "C" void *__dso_handle = nullptr;
 
 struct boredos_fat_file_info_t {
@@ -202,6 +226,164 @@ int SysdepImpl<Open>::operator()(const char *path, int flags, mode_t mode, int *
 
 // --- Read ---
 int SysdepImpl<Read>::operator()(int fd, void *buf, size_t count, ssize_t *bytes_read) {
+    if (count == 0) {
+        *bytes_read = 0;
+        return 0;
+    }
+
+    int fflags = 0;
+    int f_ret = (int)_sc4(BORED_SYS_FS, (uint64_t)FS_CMD_FCNTL, (uint64_t)fd, (uint64_t)3 /* F_GETFL */, 0);
+    if (f_ret >= 0) fflags = f_ret;
+
+    // Check if it's a TTY
+    if (SysdepImpl<Isatty>::operator()(fd) == 0) {
+        if (g_tty_termios.c_lflag & ICANON) {
+            // Canonical (line-buffered) mode
+            char *out_buf = (char *)buf;
+            
+            // If the buffer is empty, read a new line
+            if (g_canon_head == g_canon_tail) {
+                g_canon_head = 0;
+                g_canon_tail = 0;
+                
+                while (true) {
+                    // If not non-blocking, block until character is available
+                    if (!(fflags & 0x0800 /* O_NONBLOCK */)) {
+                        struct bored_pollfd {
+                            int fd;
+                            short events;
+                            short revents;
+                        } pfd;
+                        pfd.fd = fd;
+                        pfd.events = 0x0001; // POLLIN
+                        pfd.revents = 0;
+                        int rc;
+                        while ((rc = (int)_sc4(BORED_SYS_FS, (uint64_t)FS_CMD_POLL, (uint64_t)&pfd, 1ULL, (uint64_t)-1)) == -2);
+                    }
+                    
+                    char ch = 0;
+                    int read_ret = (int)_sc4(BORED_SYS_FS,
+                                             (uint64_t)FS_CMD_READ,
+                                             (uint64_t)fd,
+                                             (uint64_t)(uintptr_t)&ch,
+                                             1ULL);
+                    if (read_ret < 0) {
+                        return EIO;
+                    }
+                    if (read_ret == 0) {
+                        if (fflags & 0x0800 /* O_NONBLOCK */) {
+                            // Non-blocking EOF / EAGAIN
+                            if (g_canon_tail == 0) {
+                                *bytes_read = 0;
+                                return 0;
+                            }
+                        }
+                        break; // EOF
+                    }
+                    
+                    // Handle backspace / erase
+                    if (ch == '\b' || ch == 127) {
+                        if (g_canon_tail > 0) {
+                            g_canon_tail--;
+                            if (g_tty_termios.c_lflag & ECHO) {
+                                // Erase the character visually from screen
+                                const char erase_seq[] = "\b \b";
+                                _sc4(BORED_SYS_FS, (uint64_t)FS_CMD_WRITE, 1ULL, (uint64_t)(uintptr_t)erase_seq, 3ULL);
+                            }
+                        }
+                        continue;
+                    }
+                    
+                    // Handle newlines
+                    if (ch == '\r' || ch == '\n') {
+                        char newline_char = '\n';
+                        if (ch == '\r' && !(g_tty_termios.c_iflag & ICRNL)) {
+                            newline_char = '\r';
+                        }
+                        
+                        if (g_canon_tail < sizeof(g_canon_buffer)) {
+                            g_canon_buffer[g_canon_tail++] = newline_char;
+                        }
+                        
+                        if (g_tty_termios.c_lflag & ECHO) {
+                            _sc4(BORED_SYS_FS, (uint64_t)FS_CMD_WRITE, 1ULL, (uint64_t)(uintptr_t)&newline_char, 1ULL);
+                        }
+                        break;
+                    }
+                    
+                    // Store regular character
+                    if (g_canon_tail < sizeof(g_canon_buffer)) {
+                        g_canon_buffer[g_canon_tail++] = ch;
+                    }
+                    
+                    if (g_tty_termios.c_lflag & ECHO) {
+                        _sc4(BORED_SYS_FS, (uint64_t)FS_CMD_WRITE, 1ULL, (uint64_t)(uintptr_t)&ch, 1ULL);
+                    }
+                }
+            }
+            
+            // Copy from canon buffer to user
+            size_t copied = 0;
+            while (copied < count && g_canon_head < g_canon_tail) {
+                char ch = g_canon_buffer[g_canon_head++];
+                out_buf[copied++] = ch;
+                if (ch == '\n') {
+                    break;
+                }
+            }
+            
+            if (g_canon_head == g_canon_tail) {
+                g_canon_head = 0;
+                g_canon_tail = 0;
+            }
+            
+            *bytes_read = copied;
+            return 0;
+        } else {
+            // Non-canonical mode
+            if (!(fflags & 0x0800 /* O_NONBLOCK */)) {
+                struct bored_pollfd {
+                    int fd;
+                    short events;
+                    short revents;
+                } pfd;
+                pfd.fd = fd;
+                pfd.events = 0x0001; // POLLIN
+                pfd.revents = 0;
+                int rc;
+                while ((rc = (int)_sc4(BORED_SYS_FS, (uint64_t)FS_CMD_POLL, (uint64_t)&pfd, 1ULL, (uint64_t)-1)) == -2);
+            }
+
+            int ret = (int)_sc4(BORED_SYS_FS,
+                                (uint64_t)FS_CMD_READ,
+                                (uint64_t)fd,
+                                (uint64_t)(uintptr_t)buf,
+                                (uint64_t)count);
+            if (ret < 0) return EIO;
+            
+            if (ret > 0 && (g_tty_termios.c_lflag & ECHO)) {
+                _sc4(BORED_SYS_FS, (uint64_t)FS_CMD_WRITE, 1ULL, (uint64_t)(uintptr_t)buf, (uint64_t)ret);
+            }
+            
+            *bytes_read = ret;
+            return 0;
+        }
+    }
+
+    // Default non-terminal file read
+    if (!(fflags & 0x0800 /* O_NONBLOCK */)) {
+        struct bored_pollfd {
+            int fd;
+            short events;
+            short revents;
+        } pfd;
+        pfd.fd = fd;
+        pfd.events = 0x0001; // POLLIN
+        pfd.revents = 0;
+        int rc;
+        while ((rc = (int)_sc4(BORED_SYS_FS, (uint64_t)FS_CMD_POLL, (uint64_t)&pfd, 1ULL, (uint64_t)-1)) == -2);
+    }
+
     int ret = (int)_sc4(BORED_SYS_FS,
                         (uint64_t)FS_CMD_READ,
                         (uint64_t)fd,
@@ -707,6 +889,46 @@ int SysdepImpl<Accept>::operator()(int fd, int *newfd, struct sockaddr *addr_ptr
                         (uint64_t)(uintptr_t)addr_length);
     if (ret < 0) return ret == -2 ? EAGAIN : EACCES;
     *newfd = ret;
+    return 0;
+}
+
+#ifndef TIOCGWINSZ
+#define TIOCGWINSZ 0x5413
+#endif
+
+// --- tcgetattr ---
+int SysdepImpl<Tcgetattr>::operator()(int fd, struct termios *attr) {
+    if (SysdepImpl<Isatty>::operator()(fd) != 0) {
+        return ENOTTY;
+    }
+
+    __builtin_memcpy(attr, &g_tty_termios, sizeof(*attr));
+    return 0;
+}
+
+// --- tcsetattr ---
+int SysdepImpl<Tcsetattr>::operator()(int fd, int optional_actions, const struct termios *attr) {
+    (void)optional_actions;
+    if (SysdepImpl<Isatty>::operator()(fd) != 0) {
+        return ENOTTY;
+    }
+    __builtin_memcpy(&g_tty_termios, attr, sizeof(*attr));
+    return 0;
+}
+
+// --- tcgetwinsize ---
+int SysdepImpl<Tcgetwinsize>::operator()(int fd, struct winsize *winsz) {
+    int result = 0;
+    int err = SysdepImpl<Ioctl>::operator()(fd, TIOCGWINSZ, winsz, &result);
+    return err;
+}
+
+// --- tcsetwinsize ---
+int SysdepImpl<Tcsetwinsize>::operator()(int fd, const struct winsize *winsz) {
+    (void)winsz;
+    if (SysdepImpl<Isatty>::operator()(fd) != 0) {
+        return ENOTTY;
+    }
     return 0;
 }
 

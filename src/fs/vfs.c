@@ -757,7 +757,8 @@ int vfs_poll(vfs_file_t *file, struct poll_table *pt) {
             if (!t) return POLLNVAL;
             
             tty_queue_t *q = NULL;
-            if (file->device_type == DEVICE_TYPE_TTY || file->device_type == DEVICE_TYPE_KEYBOARD) q = &t->key_queue;
+            if (file->device_type == DEVICE_TYPE_TTY) q = &t->char_queue;
+            else if (file->device_type == DEVICE_TYPE_KEYBOARD) q = &t->key_queue;
             else q = &t->mouse_queue;
 
             if (pt && pt->qproc) {
