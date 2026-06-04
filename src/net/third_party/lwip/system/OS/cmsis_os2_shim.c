@@ -112,8 +112,53 @@ osStatus_t osMessageQueueGet(osMessageQueueId_t id, void *msg_ptr, uint8_t *msg_
     (void)msg_prio;
     message_queue_t *q = (message_queue_t *)id;
     if (!q) return osError;
-    uint64_t start = osKernelGetTickCount();
-    while (1) {
+
+    if (timeout != 0) {
+        process_t *proc = process_get_current();
+        wait_queue_entry_t entry;
+        entry.proc = proc;
+        entry.next = NULL;
+        wait_queue_add(&q->waitq, &entry);
+
+        uint32_t sleep_until = 0;
+        if (timeout != osWaitForever) {
+            extern uint32_t get_ticks(void);
+            uint32_t ticks = timeout / 16; if (ticks == 0) ticks = 1;
+            sleep_until = get_ticks() + ticks;
+        }
+
+        while (1) {
+            uint64_t flags = spinlock_acquire_irqsave(&q->lock);
+            if (q->count > 0) {
+                void *v = q->buf[q->head];
+                q->head = (q->head + 1) % q->max;
+                q->count--;
+                spinlock_release_irqrestore(&q->lock, flags);
+                wait_queue_remove(&q->waitq, &entry);
+                if (msg_ptr) *(void**)msg_ptr = v;
+                return osOK;
+            }
+
+            if (timeout != osWaitForever) {
+                extern uint32_t get_ticks(void);
+                if (get_ticks() >= sleep_until) {
+                    spinlock_release_irqrestore(&q->lock, flags);
+                    wait_queue_remove(&q->waitq, &entry);
+                    return osErrorTimeout;
+                }
+                proc->sleep_until = sleep_until;
+            } else {
+                proc->sleep_until = 0;
+            }
+
+            proc->state = PROC_STATE_BLOCKED;
+            spinlock_release_irqrestore(&q->lock, flags);
+
+            while (proc->state == PROC_STATE_BLOCKED) {
+                asm volatile("hlt");
+            }
+        }
+    } else {
         uint64_t flags = spinlock_acquire_irqsave(&q->lock);
         if (q->count > 0) {
             void *v = q->buf[q->head];
@@ -124,26 +169,7 @@ osStatus_t osMessageQueueGet(osMessageQueueId_t id, void *msg_ptr, uint8_t *msg_
             return osOK;
         }
         spinlock_release_irqrestore(&q->lock, flags);
-        if (timeout != 0) {
-            // block current process until message or timeout
-            process_t *proc = process_get_current();
-            wait_queue_entry_t entry;
-            entry.proc = proc; entry.next = NULL;
-            wait_queue_add(&q->waitq, &entry);
-            if (timeout == osWaitForever) {
-                proc->state = PROC_STATE_BLOCKED;
-            } else {
-                // convert ms to ticks (approx 16 ms per tick earlier used)
-                extern uint32_t get_ticks(void);
-                uint32_t ticks = timeout / 16; if (ticks == 0) ticks = 1;
-                proc->sleep_until = get_ticks() + ticks;
-                proc->state = PROC_STATE_BLOCKED;
-            }
-            // yield: scheduler will switch away
-            return osError; // caller in kernel will reschedule and retry; simplified
-        } else {
-            return osError;
-        }
+        return osError;
     }
 }
 
@@ -161,22 +187,58 @@ osSemaphoreId_t osSemaphoreNew(uint32_t max_count, uint32_t initial_count, void 
 osStatus_t osSemaphoreAcquire(osSemaphoreId_t id, uint32_t timeout) {
     simple_sem_t *s = (simple_sem_t*)id;
     if (!s) return osError;
-    uint64_t start = osKernelGetTickCount();
-    while (1) {
-        uint64_t flags = spinlock_acquire_irqsave(&s->lock);
-        if (s->count > 0) { s->count--; spinlock_release_irqrestore(&s->lock, flags); return osOK; }
-        spinlock_release_irqrestore(&s->lock, flags);
-        if (timeout == 0) {
-            // block forever
-            process_t *proc = process_get_current();
-            wait_queue_entry_t entry; entry.proc = proc; entry.next = NULL;
-            wait_queue_add(&s->waitq, &entry);
-            proc->state = PROC_STATE_BLOCKED;
-            return osError;
-        } else {
-            // timeout handling simplified
-            return osErrorTimeout;
+
+    if (timeout != 0) {
+        process_t *proc = process_get_current();
+        wait_queue_entry_t entry;
+        entry.proc = proc;
+        entry.next = NULL;
+        wait_queue_add(&s->waitq, &entry);
+
+        uint32_t sleep_until = 0;
+        if (timeout != osWaitForever) {
+            extern uint32_t get_ticks(void);
+            uint32_t ticks = timeout / 16; if (ticks == 0) ticks = 1;
+            sleep_until = get_ticks() + ticks;
         }
+
+        while (1) {
+            uint64_t flags = spinlock_acquire_irqsave(&s->lock);
+            if (s->count > 0) {
+                s->count--;
+                spinlock_release_irqrestore(&s->lock, flags);
+                wait_queue_remove(&s->waitq, &entry);
+                return osOK;
+            }
+
+            if (timeout != osWaitForever) {
+                extern uint32_t get_ticks(void);
+                if (get_ticks() >= sleep_until) {
+                    spinlock_release_irqrestore(&s->lock, flags);
+                    wait_queue_remove(&s->waitq, &entry);
+                    return osErrorTimeout;
+                }
+                proc->sleep_until = sleep_until;
+            } else {
+                proc->sleep_until = 0;
+            }
+
+            proc->state = PROC_STATE_BLOCKED;
+            spinlock_release_irqrestore(&s->lock, flags);
+
+            while (proc->state == PROC_STATE_BLOCKED) {
+                asm volatile("hlt");
+            }
+        }
+    } else {
+        uint64_t flags = spinlock_acquire_irqsave(&s->lock);
+        if (s->count > 0) {
+            s->count--;
+            spinlock_release_irqrestore(&s->lock, flags);
+            return osOK;
+        }
+        spinlock_release_irqrestore(&s->lock, flags);
+        return osError;
     }
 }
 

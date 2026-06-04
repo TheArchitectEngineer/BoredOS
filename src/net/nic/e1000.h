@@ -55,8 +55,8 @@
 #define E1000_ICR_TXDW     (1 << 0)
 #define E1000_ICR_RXT0     (1 << 7)
 
-#define E1000_TX_RING_SIZE 32
-#define E1000_RX_RING_SIZE 32
+#define E1000_TX_RING_SIZE 256
+#define E1000_RX_RING_SIZE 256
 
 typedef struct {
     uint64_t buffer_addr;

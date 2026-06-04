@@ -40,6 +40,7 @@
 #if !NO_SYS
 
 #include "cmsis_os2.h"
+#include "process.h"
 
 #if (defined (__CC_ARM) || defined (__ARMCC_VERSION) || defined (__ICCARM__))
 int errno;
@@ -389,9 +390,7 @@ sys_thread_t sys_thread_new(const char *name, lwip_thread_fn thread , void *arg,
 */
 sys_prot_t sys_arch_protect(void)
 {
-  osMutexAcquire(lwip_sys_mutex, osWaitForever);
-
-  return (sys_prot_t)1;
+  return 1;
 }
 
 
@@ -407,7 +406,6 @@ sys_prot_t sys_arch_protect(void)
 void sys_arch_unprotect(sys_prot_t pval)
 {
   ( void ) pval;
-  osMutexRelease(lwip_sys_mutex);
 }
 
 #endif /* !NO_SYS */

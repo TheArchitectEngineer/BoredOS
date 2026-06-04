@@ -43,5 +43,7 @@
 #define MEMP_NUM_TCP_SEG           128
 #define MEMP_NUM_PBUF              256
 #define MEMP_NUM_TCP_PCB           16
+#define PBUF_POOL_FREE_OOSEQ_QUEUE_CALL() pbuf_free_ooseq()
+#define LWIP_NETIF_LOOPBACK_MULTITHREADING 0
 
 #endif /* LWIPOPTS_H */

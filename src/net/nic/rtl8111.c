@@ -34,8 +34,8 @@ struct rtl8111_desc {
     uint64_t buf_addr;
 } __attribute__((packed, aligned(16)));
 
-#define RTL8111_NUM_RX_DESC   128
-#define RTL8111_NUM_TX_DESC   128
+#define RTL8111_NUM_RX_DESC   256
+#define RTL8111_NUM_TX_DESC   256
 
 static int rtl8111_initialized = 0;
 static uint64_t mmio_base_addr = 0;
