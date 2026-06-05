@@ -62,7 +62,8 @@ typedef enum {
     FS_CMD_UNIX_SOCKET_SEND = 30,
     FS_CMD_UNIX_SOCKET_RECV = 31,
     FS_CMD_UNIX_SOCKET_CLOSE = 32,
-    FS_CMD_UNIX_SOCKET_UNLINK = 33
+    FS_CMD_UNIX_SOCKET_UNLINK = 33,
+    FS_CMD_LIST_OFFSET = 34
 } fs_cmd_t;
 
 typedef enum {

@@ -51,6 +51,8 @@ typedef struct {
     int esc_params[8];
     int esc_num_params;
     int saved_x, saved_y;
+    int utf8_state;
+    uint32_t utf8_codepoint;
     spinlock_t lock;
 } tty_t;
 

@@ -485,7 +485,7 @@ void vfs_close(vfs_file_t *file) {
 }
 
 int vfs_read(vfs_file_t *file, void *buf, int size) {
-    if (!file || !file->valid || !file->mount) return -1;
+    if (!file || !file->valid || !file->mount || !file->mount->active) return -1;
     
     if (file->is_device) {
         if (file->device_type == DEVICE_TYPE_BLOCK) {
@@ -571,6 +571,8 @@ int vfs_read(vfs_file_t *file, void *buf, int size) {
 }
 
 int vfs_write(vfs_file_t *file, const void *buf, int size) {
+    if (!file || !file->valid || !file->mount || !file->mount->active) return -1;
+
     if (file->is_device) {
         if (file->device_type == DEVICE_TYPE_TTY) {
             tty_write((int)(uintptr_t)file->fs_handle, (const char*)buf, size);
@@ -644,7 +646,7 @@ int vfs_write(vfs_file_t *file, const void *buf, int size) {
     return file->mount->ops->write(file->mount->fs_private, file->fs_handle, buf, size);
 }
 int vfs_ioctl(vfs_file_t *file, uint64_t request, void *arg) {
-    if (!file || !file->valid || !file->mount) return -1;
+    if (!file || !file->valid || !file->mount || !file->mount->active) return -1;
     
     if (file->is_device) {
         if (file->device_type == DEVICE_TYPE_TTY) {
@@ -822,7 +824,7 @@ int vfs_ioctl(vfs_file_t *file, uint64_t request, void *arg) {
 }
 
 int vfs_seek(vfs_file_t *file, int offset, int whence) {
-    if (!file || !file->valid || !file->mount) return -1;
+    if (!file || !file->valid || !file->mount || !file->mount->active) return -1;
     
     if (file->is_device) {
         if (file->device_type == DEVICE_TYPE_FRAMEBUFFER) {
@@ -888,7 +890,7 @@ int vfs_seek(vfs_file_t *file, int offset, int whence) {
 }
 
 int vfs_poll(vfs_file_t *file, struct poll_table *pt) {
-    if (!file || !file->valid || !file->mount) return POLLNVAL;
+    if (!file || !file->valid || !file->mount || !file->mount->active) return POLLNVAL;
     if (file->is_device) {
         if (file->device_type == DEVICE_TYPE_TTY || file->device_type == DEVICE_TYPE_KEYBOARD || file->device_type == DEVICE_TYPE_MOUSE) {
             tty_t *t = tty_get((int)(uintptr_t)file->fs_handle);
@@ -920,14 +922,14 @@ int vfs_poll(vfs_file_t *file, struct poll_table *pt) {
 }
 
 uint32_t vfs_file_position(vfs_file_t *file) {
-    if (!file || !file->valid || !file->mount) return 0;
+    if (!file || !file->valid || !file->mount || !file->mount->active) return 0;
     if (file->is_device) return (uint32_t)file->position;
     if (!file->mount->ops->get_position) return 0;
     return file->mount->ops->get_position(file->fs_handle);
 }
 
 uint32_t vfs_file_size(vfs_file_t *file) {
-    if (!file || !file->valid || !file->mount) return 0;
+    if (!file || !file->valid || !file->mount || !file->mount->active) return 0;
     if (file->is_device) {
         if (file->device_type == DEVICE_TYPE_FRAMEBUFFER) {
             vfs_framebuffer_info_t fb = graphics_get_fb_backing_params();
@@ -947,7 +949,7 @@ uint32_t vfs_file_size(vfs_file_t *file) {
 
 
 
-int vfs_list_directory(const char *path, vfs_dirent_t *entries, int max) {
+int vfs_list_directory(const char *path, vfs_dirent_t *entries, int max, int offset) {
     if (!path || !entries) return -1;
     
 
@@ -960,38 +962,62 @@ int vfs_list_directory(const char *path, vfs_dirent_t *entries, int max) {
     int count = 0;
     if (mount && mount->ops->readdir) {
         if (!rel_path || rel_path[0] == '\0') rel_path = "/";
-        count = mount->ops->readdir(mount->fs_private, rel_path, entries, max);
+        count = mount->ops->readdir(mount->fs_private, rel_path, entries, max, offset);
         if (count < 0) count = 0; 
     }
 
-    uint64_t v_flags = spinlock_acquire_irqsave(&vfs_lock);
-    for (int i = 0; i < mount_count; i++) {
-        if (!mounts[i].active) continue;
-        if (vfs_strcmp(mounts[i].path, normalized) == 0) continue; 
+    if (offset == 0) {
+        uint64_t v_flags = spinlock_acquire_irqsave(&vfs_lock);
+        for (int i = 0; i < mount_count; i++) {
+            if (!mounts[i].active) continue;
+            if (vfs_strcmp(mounts[i].path, normalized) == 0) continue; 
 
-        if (vfs_path_is_parent(normalized, mounts[i].path)) {
-            const char *sub = mounts[i].path + vfs_strlen(normalized);
-            if (*sub == '/') sub++; 
+            if (vfs_path_is_parent(normalized, mounts[i].path)) {
+                const char *sub = mounts[i].path + vfs_strlen(normalized);
+                if (*sub == '/') sub++; 
 
-            if (*sub != '\0') {
-                char comp[VFS_MAX_NAME];
-                int j = 0;
-                while (sub[j] && sub[j] != '/' && j < VFS_MAX_NAME - 1) {
-                    comp[j] = sub[j];
-                    j++;
+                if (*sub != '\0') {
+                    char comp[VFS_MAX_NAME];
+                    int j = 0;
+                    while (sub[j] && sub[j] != '/' && j < VFS_MAX_NAME - 1) {
+                        comp[j] = sub[j];
+                        j++;
+                    }
+                    comp[j] = 0;
+
+                    bool found = false;
+                    for (int k = 0; k < count; k++) {
+                        if (vfs_strcmp(entries[k].name, comp) == 0) {
+                            found = true;
+                            break;
+                        }
+                    }
+
+                    if (!found && count < max) {
+                        vfs_strcpy(entries[count].name, comp);
+                        entries[count].is_directory = 1;
+                        entries[count].size = 0;
+                        entries[count].start_cluster = 0;
+                        count++;
+                    }
                 }
-                comp[j] = 0;
+            }
+        }
+        spinlock_release_irqrestore(&vfs_lock, v_flags);
 
+        // Special case: Ensure "dev", "sys", "proc" are visible in "/"
+        if (vfs_strcmp(normalized, "/") == 0) {
+            const char *virtual_dirs[] = {"dev", "sys", "proc"};
+            for (int v = 0; v < 3; v++) {
                 bool found = false;
-                for (int k = 0; k < count; k++) {
-                    if (vfs_strcmp(entries[k].name, comp) == 0) {
+                for (int i = 0; i < count; i++) {
+                    if (vfs_strcmp(entries[i].name, virtual_dirs[v]) == 0) {
                         found = true;
                         break;
                     }
                 }
-
                 if (!found && count < max) {
-                    vfs_strcpy(entries[count].name, comp);
+                    vfs_strcpy(entries[count].name, virtual_dirs[v]);
                     entries[count].is_directory = 1;
                     entries[count].size = 0;
                     entries[count].start_cluster = 0;
@@ -999,98 +1025,76 @@ int vfs_list_directory(const char *path, vfs_dirent_t *entries, int max) {
                 }
             }
         }
-    }
-    spinlock_release_irqrestore(&vfs_lock, v_flags);
 
-    // Special case: Ensure "dev", "sys", "proc" are visible in "/"
-    if (vfs_strcmp(normalized, "/") == 0) {
-        const char *virtual_dirs[] = {"dev", "sys", "proc"};
-        for (int v = 0; v < 3; v++) {
-            bool found = false;
-            for (int i = 0; i < count; i++) {
-                if (vfs_strcmp(entries[i].name, virtual_dirs[v]) == 0) {
-                    found = true;
-                    break;
-                }
-            }
-            if (!found && count < max) {
-                vfs_strcpy(entries[count].name, virtual_dirs[v]);
-                entries[count].is_directory = 1;
+        // Special case: /dev listing for block devices and TTYs
+        if (vfs_strcmp(normalized, "/dev") == 0) {
+            // TTY devices
+            for (int i = 0; i < TTY_COUNT && count < max; i++) {
+                char name[16];
+                vfs_strcpy(name, "tty");
+                int pos = 3;
+                if (i + 1 >= 10) name[pos++] = '1';
+                name[pos++] = '0' + ((i + 1) % 10);
+                name[pos] = '\0';
+                
+                vfs_strcpy(entries[count].name, name);
                 entries[count].size = 0;
-                entries[count].start_cluster = 0;
+                entries[count].is_directory = 0;
                 count++;
             }
-        }
-    }
 
-    // Special case: /dev listing for block devices and TTYs
-    if (vfs_strcmp(normalized, "/dev") == 0) {
-        // TTY devices
-        for (int i = 0; i < TTY_COUNT && count < max; i++) {
-            char name[16];
-            vfs_strcpy(name, "tty");
-            int pos = 3;
-            if (i + 1 >= 10) name[pos++] = '1';
-            name[pos++] = '0' + ((i + 1) % 10);
-            name[pos] = '\0';
-            
-            vfs_strcpy(entries[count].name, name);
-            entries[count].size = 0;
-            entries[count].is_directory = 0;
-            count++;
-        }
+            // Input devices (singular aliases)
+            if (count < max) {
+                vfs_strcpy(entries[count].name, "keyboard");
+                entries[count].size = 0;
+                entries[count].is_directory = 0;
+                count++;
+            }
+            if (count < max) {
+                vfs_strcpy(entries[count].name, "mouse");
+                entries[count].size = 0;
+                entries[count].is_directory = 0;
+                count++;
+            }
 
-        // Input devices (singular aliases)
-        if (count < max) {
-            vfs_strcpy(entries[count].name, "keyboard");
-            entries[count].size = 0;
-            entries[count].is_directory = 0;
-            count++;
-        }
-        if (count < max) {
-            vfs_strcpy(entries[count].name, "mouse");
-            entries[count].size = 0;
-            entries[count].is_directory = 0;
-            count++;
-        }
+            // Framebuffer device
+            if (count < max) {
+                vfs_strcpy(entries[count].name, "fb0");
+                vfs_framebuffer_info_t fb = graphics_get_fb_params();
+                entries[count].size = (uint64_t)fb.width * fb.height * (fb.bpp / 8);
+                entries[count].is_directory = 0;
+                count++;
+            }
 
-        // Framebuffer device
-        if (count < max) {
-            vfs_strcpy(entries[count].name, "fb0");
-            vfs_framebuffer_info_t fb = graphics_get_fb_params();
-            entries[count].size = (uint64_t)fb.width * fb.height * (fb.bpp / 8);
-            entries[count].is_directory = 0;
-            count++;
-        }
+            // Shared memory directory
+            if (count < max) {
+                vfs_strcpy(entries[count].name, "shm");
+                entries[count].size = 0;
+                entries[count].is_directory = 1;
+                count++;
+            }
 
-        // Shared memory directory
-        if (count < max) {
-            vfs_strcpy(entries[count].name, "shm");
-            entries[count].size = 0;
-            entries[count].is_directory = 1;
-            count++;
-        }
-
-        int dcount = disk_get_count();
-        for (int i = 0; i < dcount && count < max; i++) {
-            Disk *d = disk_get_by_index(i);
-            if (d && d->registered) {
-                // Ensure unique name (disk_manager_scan might register partitions)
-                bool found = false;
-                for (int k = 0; k < count; k++) {
-                    if (vfs_strcmp(entries[k].name, d->devname) == 0) {
-                        found = true;
-                        break;
+            int dcount = disk_get_count();
+            for (int i = 0; i < dcount && count < max; i++) {
+                Disk *d = disk_get_by_index(i);
+                if (d && d->registered) {
+                    // Ensure unique name (disk_manager_scan might register partitions)
+                    bool found = false;
+                    for (int k = 0; k < count; k++) {
+                        if (vfs_strcmp(entries[k].name, d->devname) == 0) {
+                            found = true;
+                            break;
+                        }
                     }
-                }
-                if (!found) {
-                    vfs_strcpy(entries[count].name, d->devname);
-                    entries[count].size = (uint64_t)d->total_sectors * 512;
-                    entries[count].is_directory = 0;
-                    entries[count].start_cluster = 0;
-                    entries[count].write_date = 0;
-                    entries[count].write_time = 0;
-                    count++;
+                    if (!found) {
+                        vfs_strcpy(entries[count].name, d->devname);
+                        entries[count].size = (uint64_t)d->total_sectors * 512;
+                        entries[count].is_directory = 0;
+                        entries[count].start_cluster = 0;
+                        entries[count].write_date = 0;
+                        entries[count].write_time = 0;
+                        count++;
+                    }
                 }
             }
         }

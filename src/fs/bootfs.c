@@ -35,7 +35,7 @@ static void bootfs_close(void *fs_private, void *handle);
 static int bootfs_read(void *fs_private, void *handle, void *buf, int size);
 static int bootfs_write(void *fs_private, void *handle, const void *buf, int size);
 static int bootfs_seek(void *fs_private, void *handle, int offset, int whence);
-static int bootfs_readdir(void *fs_private, const char *rel_path, vfs_dirent_t *entries, int max);
+static int bootfs_readdir(void *fs_private, const char *rel_path, vfs_dirent_t *entries, int max, int offset);
 static bool bootfs_mkdir(void *fs_private, const char *rel_path);
 static bool bootfs_rmdir(void *fs_private, const char *rel_path);
 static bool bootfs_unlink(void *fs_private, const char *rel_path);
@@ -292,55 +292,51 @@ static int bootfs_seek(void *fs_private, void *handle, int offset, int whence) {
     return h->offset;
 }
 
-static int bootfs_readdir(void *fs_private, const char *rel_path, vfs_dirent_t *entries, int max) {
+static int bootfs_readdir(void *fs_private, const char *rel_path, vfs_dirent_t *entries, int max, int offset) {
     if (!entries || max <= 0) return 0;
     
     if (!rel_path) rel_path = "";
     if (rel_path[0] == '/') rel_path++;
     
     int count = 0;
+    int found_so_far = 0;
     
     if (rel_path[0] == '\0') {
-        if (count < max) {
-            strcpy(entries[count].name, "limine.conf");
-            entries[count].size = g_bootfs_state.limine_conf_len;
-            entries[count].is_directory = 0;
-            count++;
+        const char *boot_files[] = {
+            "limine.conf", "kernel", "initrd", "initrd.tar", "metadata"
+        };
+        for (int i = 0; i < 5; i++) {
+            if (found_so_far >= offset) {
+                strcpy(entries[count].name, boot_files[i]);
+                if (strcmp(boot_files[i], "limine.conf") == 0) {
+                    entries[count].size = g_bootfs_state.limine_conf_len;
+                    entries[count].is_directory = 0;
+                } else if (strcmp(boot_files[i], "kernel") == 0) {
+                    entries[count].size = g_bootfs_state.kernel_size;
+                    entries[count].is_directory = 0;
+                } else if (strcmp(boot_files[i], "initrd") == 0 || strcmp(boot_files[i], "initrd.tar") == 0) {
+                    entries[count].size = g_bootfs_state.initrd_size;
+                    entries[count].is_directory = 0;
+                } else if (strcmp(boot_files[i], "metadata") == 0) {
+                    entries[count].size = 0;
+                    entries[count].is_directory = 1;
+                }
+                count++;
+                if (count >= max) return count;
+            }
+            found_so_far++;
         }
-        
-        if (count < max) {
-            strcpy(entries[count].name, "kernel");
-            entries[count].size = g_bootfs_state.kernel_size;
-            entries[count].is_directory = 0;
-            count++;
-        }
-        
-        if (count < max) {
-            strcpy(entries[count].name, "initrd");
-            entries[count].size = g_bootfs_state.initrd_size;
-            entries[count].is_directory = 0;
-            count++;
-        }
-        
-        if (count < max) {
-            strcpy(entries[count].name, "initrd.tar");
-            entries[count].size = g_bootfs_state.initrd_size;
-            entries[count].is_directory = 0;
-            count++;
-        }
-        
-        if (count < max) {
-            strcpy(entries[count].name, "metadata");
-            entries[count].size = 0;
-            entries[count].is_directory = 1;
-            count++;
-        }
+
         bootfs_custom_file_t *cf = (bootfs_custom_file_t*)g_bootfs_state.custom_files;
-        while (cf && count < max) {
-            strcpy(entries[count].name, cf->name);
-            entries[count].size = cf->size;
-            entries[count].is_directory = 0;
-            count++;
+        while (cf) {
+            if (found_so_far >= offset) {
+                strcpy(entries[count].name, cf->name);
+                entries[count].size = cf->size;
+                entries[count].is_directory = 0;
+                count++;
+                if (count >= max) return count;
+            }
+            found_so_far++;
             cf = cf->next;
         }
     }
@@ -351,11 +347,15 @@ static int bootfs_readdir(void *fs_private, const char *rel_path, vfs_dirent_t *
             "version"
         };
         
-        for (int i = 0; i < 3 && count < max; i++) {
-            strcpy(entries[count].name, meta_files[i]);
-            entries[count].size = 0;
-            entries[count].is_directory = 0;
-            count++;
+        for (int i = 0; i < 3; i++) {
+            if (found_so_far >= offset) {
+                strcpy(entries[count].name, meta_files[i]);
+                entries[count].size = 0;
+                entries[count].is_directory = 0;
+                count++;
+                if (count >= max) return count;
+            }
+            found_so_far++;
         }
     }
     

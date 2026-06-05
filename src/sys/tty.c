@@ -68,6 +68,8 @@ void tty_init(void) {
         g_ttys[i].esc_num_params = 0;
         g_ttys[i].saved_x = 0;
         g_ttys[i].saved_y = 0;
+        g_ttys[i].utf8_state = 0;
+        g_ttys[i].utf8_codepoint = 0;
         g_ttys[i].lock = SPINLOCK_INIT;
         
         memset(g_ttys[i].vfb, 0, vfb_size);
@@ -112,12 +114,144 @@ static void tty_draw_rect(tty_t *t, int x, int y, int w, int h, uint32_t color) 
     }
 }
 
-static void tty_draw_char(tty_t *t, int x, int y, char c, uint32_t fg, uint32_t bg) {
-    if (x < 0 || x + 8 > t->width || y < 0 || y + 8 > t->height) return;
-    unsigned char uc = (unsigned char)c;
-    if (uc > 127) uc = 0;
+static bool get_box_drawing_glyph(uint32_t codepoint, uint8_t glyph[8]) {
+    memset(glyph, 0, 8);
     
-    const uint8_t *glyph = font8x8_basic[uc];
+    if (codepoint == 0x2500) { 
+        glyph[3] = 0xFF; glyph[4] = 0xFF; 
+        return true;
+    }
+    if (codepoint == 0x2502) { 
+        for (int r = 0; r < 8; r++) glyph[r] = 0x18; 
+        return true;
+    }
+    if (codepoint == 0x250C) {
+        glyph[3] = 0x1F; glyph[4] = 0x1F; 
+        glyph[5] = glyph[6] = glyph[7] = 0x18; 
+        return true;
+    }
+    if (codepoint == 0x2510) { 
+        glyph[3] = 0xF8; glyph[4] = 0xF8; 
+        glyph[5] = glyph[6] = glyph[7] = 0x18; 
+        return true;
+    }
+    if (codepoint == 0x2514) { 
+        glyph[3] = 0x1F; glyph[4] = 0x1F; 
+        glyph[0] = glyph[1] = glyph[2] = 0x18; 
+        return true;
+    }
+    if (codepoint == 0x2518) { 
+        glyph[3] = 0xF8; glyph[4] = 0xF8; 
+        glyph[0] = glyph[1] = glyph[2] = 0x18; 
+        return true;
+    }
+    if (codepoint == 0x251C) { 
+        for (int r = 0; r < 8; r++) glyph[r] = 0x18;
+        glyph[3] |= 0x0F; glyph[4] |= 0x0F; 
+        return true;
+    }
+    if (codepoint == 0x2524) { 
+        for (int r = 0; r < 8; r++) glyph[r] = 0x18; 
+        glyph[3] |= 0xF0; glyph[4] |= 0xF0; 
+        return true;
+    }
+    if (codepoint == 0x252C) { 
+        glyph[3] = 0xFF; glyph[4] = 0xFF; 
+        glyph[5] = glyph[6] = glyph[7] = 0x18; 
+        return true;
+    }
+    if (codepoint == 0x2534) { 
+        glyph[3] = 0xFF; glyph[4] = 0xFF; 
+        glyph[0] = glyph[1] = glyph[2] = 0x18; 
+        return true;
+    }
+    if (codepoint == 0x253C) { 
+        for (int r = 0; r < 8; r++) glyph[r] = 0x18;
+        glyph[3] = 0xFF; glyph[4] = 0xFF; 
+        return true;
+    }
+    
+    if (codepoint == 0x2550) {
+        glyph[2] = 0xFF; glyph[5] = 0xFF;
+        return true;
+    }
+    if (codepoint == 0x2551) {
+        for (int r = 0; r < 8; r++) glyph[r] = 0x24;
+        return true;
+    }
+    if (codepoint == 0x2554) { 
+        glyph[2] = 0x3F; glyph[5] = 0x0F;
+        glyph[3] = glyph[4] = 0x24;
+        glyph[6] = glyph[7] = 0x24;
+        return true;
+    }
+    if (codepoint == 0x2557) { 
+        glyph[2] = 0xFC; glyph[5] = 0xF0;
+        glyph[3] = glyph[4] = 0x24;
+        glyph[6] = glyph[7] = 0x24;
+        return true;
+    }
+    if (codepoint == 0x255A) {
+        glyph[5] = 0x3F; glyph[2] = 0x0F;
+        glyph[3] = glyph[4] = 0x24;
+        glyph[0] = glyph[1] = 0x24;
+        return true;
+    }
+    if (codepoint == 0x255D) { 
+        glyph[5] = 0xFC; glyph[2] = 0xF0;
+        glyph[3] = glyph[4] = 0x24;
+        glyph[0] = glyph[1] = 0x24;
+        return true;
+    }
+    if (codepoint == 0x2560) { 
+        for (int r = 0; r < 8; r++) glyph[r] = 0x24;
+        glyph[2] |= 0x3F; glyph[5] |= 0x3F;
+        return true;
+    }
+    if (codepoint == 0x2563) {
+        for (int r = 0; r < 8; r++) glyph[r] = 0x24;
+        glyph[2] |= 0xFC; glyph[5] |= 0xFC;
+        return true;
+    }
+    if (codepoint == 0x2566) { 
+        glyph[2] = 0xFF; glyph[5] = 0xFF;
+        glyph[3] = glyph[4] = 0x24;
+        glyph[6] = glyph[7] = 0x24;
+        return true;
+    }
+    if (codepoint == 0x2569) { 
+        glyph[2] = 0xFF; glyph[5] = 0xFF;
+        glyph[3] = glyph[4] = 0x24;
+        glyph[0] = glyph[1] = 0x24;
+        return true;
+    }
+    if (codepoint == 0x256C) { 
+        for (int r = 0; r < 8; r++) glyph[r] = 0x24;
+        glyph[2] = 0xFF; glyph[5] = 0xFF;
+        return true;
+    }
+
+    if (codepoint == 0x2588) { 
+        for (int r = 0; r < 8; r++) glyph[r] = 0xFF;
+        return true;
+    }
+    
+    return false;
+}
+
+static void tty_draw_char(tty_t *t, int x, int y, uint32_t codepoint, uint32_t fg, uint32_t bg) {
+    if (x < 0 || x + 8 > t->width || y < 0 || y + 8 > t->height) return;
+    
+    uint8_t custom_glyph[8];
+    const uint8_t *glyph;
+    if (get_box_drawing_glyph(codepoint, custom_glyph)) {
+        glyph = custom_glyph;
+    } else {
+        uint32_t uc = codepoint;
+        if (uc > 127) uc = 0;
+        glyph = font8x8_basic[uc];
+    }
+    
     for (int row = 0; row < 8; row++) {
         uint32_t *vfb_row = &t->vfb[(y + row) * t->width + x];
         uint8_t glyph_row = glyph[row];
@@ -182,7 +316,52 @@ void tty_write(int id, const char *data, size_t len) {
     int font_h = 8;
     
     for (size_t i = 0; i < len; i++) {
-        char c = data[i];
+        char raw_c = data[i];
+        uint32_t c = 0;
+        bool has_codepoint = false;
+        unsigned char uc = (unsigned char)raw_c;
+        
+        if (t->utf8_state == 0) {
+            if ((uc & 0x80) == 0) {
+                c = uc;
+                has_codepoint = true;
+            } else if ((uc & 0xE0) == 0xC0) {
+                t->utf8_codepoint = uc & 0x1F;
+                t->utf8_state = 1;
+            } else if ((uc & 0xF0) == 0xE0) {
+                t->utf8_codepoint = uc & 0x0F;
+                t->utf8_state = 2;
+            } else if ((uc & 0xF8) == 0xF0) {
+                t->utf8_codepoint = uc & 0x07;
+                t->utf8_state = 3;
+            }
+        } else {
+            if ((uc & 0xC0) == 0x80) {
+                t->utf8_codepoint = (t->utf8_codepoint << 6) | (uc & 0x3F);
+                t->utf8_state--;
+                if (t->utf8_state == 0) {
+                    c = t->utf8_codepoint;
+                    has_codepoint = true;
+                }
+            } else {
+                t->utf8_state = 0;
+                if ((uc & 0x80) == 0) {
+                    c = uc;
+                    has_codepoint = true;
+                } else if ((uc & 0xE0) == 0xC0) {
+                    t->utf8_codepoint = uc & 0x1F;
+                    t->utf8_state = 1;
+                } else if ((uc & 0xF0) == 0xE0) {
+                    t->utf8_codepoint = uc & 0x0F;
+                    t->utf8_state = 2;
+                } else if ((uc & 0xF8) == 0xF0) {
+                    t->utf8_codepoint = uc & 0x07;
+                    t->utf8_state = 3;
+                }
+            }
+        }
+        
+        if (!has_codepoint) continue;
         
         if (t->esc_state == 1) { 
             if (c == '[') {
@@ -293,6 +472,12 @@ void tty_write(int id, const char *data, size_t len) {
                                 0xFF569CD6, 0xFFC586C0, 0xFF4EC9B0, 0xFFFFFFFF
                             };
                             t->bg_color = colors[p - 40];
+                        } else if (p >= 100 && p <= 107) {
+                            static const uint32_t colors[] = {
+                                0xFF555555, 0xFFFF5555, 0xFF55FF55, 0xFFFFFF55,
+                                0xFF5555FF, 0xFFFF55FF, 0xFF55FFFF, 0xFFFFFFFF
+                            };
+                            t->bg_color = colors[p - 100];
                         } else if (p == 48) { // Extended BG
                              if (j + 2 <= t->esc_num_params && t->esc_params[j+1] == 5) {
                                 j += 2; // Ignore for now

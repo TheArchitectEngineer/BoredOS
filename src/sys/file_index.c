@@ -89,7 +89,7 @@ static void index_walk_directory(const char *path, int depth) {
         return; 
     }
     
-    int count = vfs_list_directory(path, entries, 1024);
+    int count = vfs_list_directory(path, entries, 1024, 0);
     
     if (count <= 0 || count > 1024) {
         kfree(entries);

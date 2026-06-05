@@ -16,6 +16,9 @@ FONT_SRC := external/bfonts/fonts
 KERNEL_ELF = $(BUILD_DIR)/boredos.elf
 ISO_IMAGE = boredos.iso
 
+# Package-based applications/assets
+PACKAGES = kilo lua bfonts nova doomgeneric bart
+
 BLUE  = \033[1;34m
 GREEN = \033[1;32m
 YELLOW= \033[1;33m
@@ -137,7 +140,15 @@ userland: build/sdk
 	$(MAKE) -C external/bpm BOREDOS_SDK=$(abspath build/sdk) DESTDIR=$(abspath build/userland/bin)
 	@printf "$(GREEN)[OK]$(RESET) Userland build complete.\n"
 
-$(BUILD_DIR)/initrd.tar: $(KERNEL_ELF) userland
+.PHONY: packages
+packages: build/sdk
+	$(call PRINT_STEP,BUILDING BOREDOS PACKAGES)
+	@for pkg in $(PACKAGES); do \
+		printf "$(YELLOW)[PACKAGES]$(RESET) Building package $$pkg...\n"; \
+		$(MAKE) -C external/$$pkg BOREDOS_SDK=$(abspath build/sdk) bup || exit 1; \
+	done
+
+$(BUILD_DIR)/initrd.tar: $(KERNEL_ELF) userland packages
 	$(call PRINT_STEP,BUILDING INITRD)
 	@printf "$(YELLOW)[INITRD]$(RESET) Cleaning previous initrd directory...\n"
 	rm -rf $(BUILD_DIR)/initrd
@@ -178,14 +189,21 @@ $(BUILD_DIR)/initrd.tar: $(KERNEL_ELF) userland
 	@printf "$(YELLOW)[STAGE]$(RESET) Invoking modular repository installations...\n"
 	$(MAKE) -C external/bsh BOREDOS_SDK=$(abspath build/sdk) DESTDIR=$(abspath $(BUILD_DIR)/initrd) install
 	$(MAKE) -C external/coreutils BOREDOS_SDK=$(abspath build/sdk) DESTDIR=$(abspath $(BUILD_DIR)/initrd) install
-	$(MAKE) -C external/nova BOREDOS_SDK=$(abspath build/sdk) DESTDIR=$(abspath $(BUILD_DIR)/initrd) install
-	$(MAKE) -C external/kilo BOREDOS_SDK=$(abspath build/sdk) DESTDIR=$(abspath $(BUILD_DIR)/initrd) install
 	$(MAKE) -C external/boredos_install BOREDOS_SDK=$(abspath build/sdk) DESTDIR=$(abspath $(BUILD_DIR)/initrd) install
-	$(MAKE) -C external/lua BOREDOS_SDK=$(abspath build/sdk) DESTDIR=$(abspath $(BUILD_DIR)/initrd) install
 	$(MAKE) -C external/tcc BOREDOS_SDK=$(abspath build/sdk) DESTDIR=$(abspath $(BUILD_DIR)/initrd) install
 	$(MAKE) -C external/netutils BOREDOS_SDK=$(abspath build/sdk) DESTDIR=$(abspath $(BUILD_DIR)/initrd) install
-	$(MAKE) -C external/doomgeneric BOREDOS_SDK=$(abspath build/sdk) DESTDIR=$(abspath $(BUILD_DIR)/initrd) install
 	$(MAKE) -C external/bpm BOREDOS_SDK=$(abspath build/sdk) DESTDIR=$(abspath $(BUILD_DIR)/initrd) install
+	@for pkg in $(PACKAGES); do \
+		$(MAKE) -C external/$$pkg BOREDOS_SDK=$(abspath build/sdk) DESTDIR=$(abspath $(BUILD_DIR)/initrd) install || exit 1; \
+	done
+
+	@printf "$(YELLOW)[STAGE]$(RESET) Staging package .bup files on Live CD...\n"
+	@mkdir -p $(BUILD_DIR)/initrd/usr/share/packages
+	@for pkg in $(PACKAGES); do \
+		cp external/$$pkg/build/$$pkg.bup $(BUILD_DIR)/initrd/usr/share/packages/ || exit 1; \
+	done
+	@printf "$(YELLOW)[PACKAGES]$(RESET) Generating exclusions list...\n"
+	@bash tools/gen_excludes.sh $(abspath $(BUILD_DIR)/initrd)
 
 	@printf "$(YELLOW)[COPY]$(RESET) Staging SDK development environment files in initrd...\n"
 	@cp build/sdk/lib/libc.a $(BUILD_DIR)/initrd/usr/lib/
@@ -200,13 +218,6 @@ $(BUILD_DIR)/initrd.tar: $(KERNEL_ELF) userland
 	@cp build/sdk/lib/crtn.o $(BUILD_DIR)/initrd/usr/lib/crtn.o
 	@cp -r build/sdk/include/. $(BUILD_DIR)/initrd/usr/include/
 
-	@printf "$(YELLOW)[COPY]$(RESET) Wallpapers...\n"
-	@for f in external/bart/wallpapers/*; do \
-		if [ -f "$$f" ]; then \
-			printf "  -> $$f\n"; \
-			cp "$$f" $(BUILD_DIR)/initrd/Library/images/Wallpapers/; \
-		fi \
-	done
 	@printf "$(YELLOW)[COPY]$(RESET) Colloid icons...\n"
 	@for f in $(COLLOID_ICONS); do \
 		src="external/colloid/src/$$f"; \
@@ -216,33 +227,8 @@ $(BUILD_DIR)/initrd.tar: $(KERNEL_ELF) userland
 		fi \
 	done
 
-	@printf "$(YELLOW)[COPY]$(RESET) BoredOS icons...\n"
-	@mkdir -p $(BUILD_DIR)/initrd/Library/images/icons/boredos
-	@for f in external/bart/icons/boredos/*.png; do \
-		if [ -f "$$f" ]; then \
-			printf "  -> $$f\n"; \
-			cp "$$f" $(BUILD_DIR)/initrd/Library/images/icons/boredos/; \
-		fi \
-	done
-
 	@printf "$(YELLOW)[COPY]$(RESET) Branding assets...\n"
 	@cp -r branding/* $(BUILD_DIR)/initrd/Library/images/branding/
-
-	@printf "$(YELLOW)[COPY]$(RESET) Fonts...\n"
-	@for f in $(FONT_SRC)/*.ttf; do \
-		if [ -f "$$f" ]; then \
-			printf "  -> $$f\n"; \
-			cp "$$f" $(BUILD_DIR)/initrd/Library/Fonts/; \
-		fi \
-	done
-
-	@printf "$(YELLOW)[COPY]$(RESET) Emoji fonts...\n"
-	@for f in $(FONT_SRC)/Emoji/*.ttf; do \
-		if [ -f "$$f" ]; then \
-			printf "  -> $$f\n"; \
-			cp "$$f" $(BUILD_DIR)/initrd/Library/Fonts/Emoji/; \
-		fi \
-	done
 
 	@printf "$(YELLOW)[COPY]$(RESET) bsh configuration...\n"
 	@if [ -f $(SRC_DIR)/library/bsh/bshrc ]; then printf "  -> bshrc\n"; cp $(SRC_DIR)/library/bsh/bshrc $(BUILD_DIR)/initrd/Library/bsh/; fi

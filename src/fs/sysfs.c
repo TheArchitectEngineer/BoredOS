@@ -62,18 +62,22 @@ static int sysfs_write(void *fs_private, void *handle, const void *buf, int size
     return bytes;
 }
 
-static int sysfs_readdir(void *fs_private, const char *path, vfs_dirent_t *entries, int max) {
+static int sysfs_readdir(void *fs_private, const char *path, vfs_dirent_t *entries, int max, int offset) {
     if (path[0] == '/') path++;
     
     kernel_subsystem_t *exact_sub = subsystem_get_by_name(path);
     int out = 0;
+    int found_so_far = 0;
 
     if (exact_sub) {
         for (int i = 0; i < exact_sub->file_count && out < max; i++) {
-            strcpy(entries[out].name, exact_sub->files[i].name);
-            entries[out].is_directory = 0;
-            entries[out].size = 0;
-            out++;
+            if (found_so_far >= offset) {
+                strcpy(entries[out].name, exact_sub->files[i].name);
+                entries[out].is_directory = 0;
+                entries[out].size = 0;
+                out++;
+            }
+            found_so_far++;
         }
     }
 
@@ -94,19 +98,43 @@ static int sysfs_readdir(void *fs_private, const char *path, vfs_dirent_t *entri
 
             if (comp[0] == '\0') continue;
 
-            bool found = false;
-            for (int k = 0; k < out; k++) {
-                if (strcmp(entries[k].name, comp) == 0) {
-                    found = true;
-                    break;
+            bool already_processed = false;
+            for (int prev = 0; prev < i; prev++) {
+                kernel_subsystem_t *ps = subsystem_get_by_index(prev);
+                if (path_len == 0 || (strlen(ps->name) > path_len && strncmp(ps->name, path, path_len) == 0 && ps->name[path_len] == '/')) {
+                    const char *p_sub_path = ps->name + (path_len ? path_len + 1 : 0);
+                    char p_comp[64];
+                    int pj = 0;
+                    while (p_sub_path[pj] && p_sub_path[pj] != '/' && pj < 63) {
+                        p_comp[pj] = p_sub_path[pj];
+                        pj++;
+                    }
+                    p_comp[pj] = 0;
+                    if (strcmp(p_comp, comp) == 0) {
+                        already_processed = true;
+                        break;
+                    }
                 }
             }
-            if (!found) {
+
+            if (!already_processed && exact_sub) {
+                for (int f = 0; f < exact_sub->file_count; f++) {
+                    if (strcmp(exact_sub->files[f].name, comp) == 0) {
+                        already_processed = true;
+                        break;
+                    }
+                }
+            }
+
+            if (already_processed) continue;
+
+            if (found_so_far >= offset) {
                 strcpy(entries[out].name, comp);
                 entries[out].is_directory = 1;
                 entries[out].size = 0;
                 out++;
             }
+            found_so_far++;
         }
     }
     return out;

@@ -389,6 +389,15 @@ process_t* process_create_elf(const char* filepath, const char* args_str, bool t
     if (parent) {
         for (int i = 0; i < MAX_PROCESS_FDS; i++) {
             if (parent->fds[i]) {
+                if (parent->fd_kind[i] == PROC_FD_KIND_FILE) {
+                    process_fd_file_ref_t *ref = (process_fd_file_ref_t *)parent->fds[i];
+                    if (ref) {
+                        vfs_file_t *vf = (vfs_file_t *)ref->file;
+                        if (tty_id < 0 && vf && vf->is_device && vf->device_type == DEVICE_TYPE_TTY) {
+                            continue;
+                        }
+                    }
+                }
                 new_proc->fds[i] = parent->fds[i];
                 new_proc->fd_kind[i] = parent->fd_kind[i];
                 new_proc->fd_flags[i] = parent->fd_flags[i];

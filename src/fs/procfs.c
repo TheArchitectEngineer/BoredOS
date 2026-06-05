@@ -386,44 +386,57 @@ int procfs_write(void *fs_private, void *handle, const void *buf, int size) {
     return -1;
 }
 
-int procfs_readdir(void *fs_private, const char *path, vfs_dirent_t *entries, int max) {
+int procfs_readdir(void *fs_private, const char *path, vfs_dirent_t *entries, int max, int offset) {
     if (path[0] == '/') path++;
 
-    if (path[0] == '\0') {
-        int out = 0;
-        strcpy(entries[out++].name, "version");
-        entries[out-1].is_directory = 0;
-        strcpy(entries[out++].name, "uptime");
-        entries[out-1].is_directory = 0;
-        strcpy(entries[out++].name, "cpuinfo");
-        entries[out-1].is_directory = 0;
-        strcpy(entries[out++].name, "meminfo");
-        entries[out-1].is_directory = 0;
-        strcpy(entries[out++].name, "datetime");
-        entries[out-1].is_directory = 0;
-        strcpy(entries[out++].name, "devices");
-        entries[out-1].is_directory = 0;
+    int out = 0;
+    int found_so_far = 0;
 
-        extern process_t processes[];
-        for (int i = 0; i < 16 && out < max; i++) {
-            if (processes[i].pid != 0xFFFFFFFF) {
-                itoa(processes[i].pid, entries[out].name);
-                entries[out].is_directory = 1;
+    if (path[0] == '\0') {
+        const char *static_files[] = {
+            "version", "uptime", "cpuinfo", "meminfo", "datetime", "devices"
+        };
+        for (int i = 0; i < 6; i++) {
+            if (found_so_far >= offset) {
+                strcpy(entries[out].name, static_files[i]);
+                entries[out].is_directory = 0;
                 entries[out].size = 0;
                 out++;
+                if (out >= max) return out;
+            }
+            found_so_far++;
+        }
+
+        extern process_t processes[];
+        for (int i = 0; i < 16; i++) {
+            if (processes[i].pid != 0xFFFFFFFF) {
+                if (found_so_far >= offset) {
+                    itoa(processes[i].pid, entries[out].name);
+                    entries[out].is_directory = 1;
+                    entries[out].size = 0;
+                    out++;
+                    if (out >= max) return out;
+                }
+                found_so_far++;
             }
         }
         return out;
     }
 
     if (path[0] >= '0' && path[0] <= '9') {
-        int out = 0;
-        strcpy(entries[out++].name, "name");
-        strcpy(entries[out++].name, "status");
-        strcpy(entries[out++].name, "cmdline");
-        strcpy(entries[out++].name, "cwd");
-        strcpy(entries[out++].name, "signal");
-        for(int i=0; i<out; i++) entries[i].is_directory = 0;
+        const char *pid_files[] = {
+            "name", "status", "cmdline", "cwd", "signal"
+        };
+        for (int i = 0; i < 5; i++) {
+            if (found_so_far >= offset) {
+                strcpy(entries[out].name, pid_files[i]);
+                entries[out].is_directory = 0;
+                entries[out].size = 0;
+                out++;
+                if (out >= max) return out;
+            }
+            found_so_far++;
+        }
         return out;
     }
 

@@ -52,7 +52,7 @@ typedef struct vfs_fs_ops {
     int   (*seek)(void *fs_private, void *file_handle, int offset, int whence);
 
     // Directory operations
-    int   (*readdir)(void *fs_private, const char *rel_path, vfs_dirent_t *entries, int max);
+    int   (*readdir)(void *fs_private, const char *rel_path, vfs_dirent_t *entries, int max, int offset);
     bool  (*mkdir)(void *fs_private, const char *rel_path);
     bool  (*rmdir)(void *fs_private, const char *rel_path);
     bool  (*unlink)(void *fs_private, const char *rel_path);
@@ -117,7 +117,7 @@ int vfs_seek(vfs_file_t *file, int offset, int whence);
 int vfs_poll(vfs_file_t *file, struct poll_table *pt);
 
 // Directory operations
-int vfs_list_directory(const char *path, vfs_dirent_t *entries, int max);
+int vfs_list_directory(const char *path, vfs_dirent_t *entries, int max, int offset);
 bool vfs_mkdir(const char *path);
 bool vfs_rmdir(const char *path);
 bool vfs_delete(const char *path);

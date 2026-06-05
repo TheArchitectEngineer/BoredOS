@@ -71,7 +71,7 @@ static FAT32_Volume *root_volume = NULL;
 static uint32_t realfs_allocate_cluster(FAT32_Volume *vol);
 static void handle_fat32_truncate(FAT32_FileHandle *handle);
 static FAT32_FileHandle* realfs_open_from_vol(FAT32_Volume *vol, const char *path, const char *mode);
-static int realfs_list_directory_vol(FAT32_Volume *vol, const char *path, FAT32_FileInfo *entries, int max_entries);
+static int realfs_list_directory_vol(FAT32_Volume *vol, const char *path, FAT32_FileInfo *entries, int max_entries, int offset);
 static bool realfs_delete_from_vol(FAT32_Volume *vol, const char *path);
 static bool realfs_mount_volume(FAT32_Volume *vol, Disk *disk);
 static void realfs_update_dir_entry_size(FAT32_Volume *vol, FAT32_FileHandle *handle);
@@ -1434,7 +1434,7 @@ static void extract_lfn_chars(FAT32_LFNEntry *lfn, char *buffer) {
     }
 }
 
-static int realfs_list_directory_vol(FAT32_Volume *vol, const char *path, FAT32_FileInfo *entries, int max_entries) {
+static int realfs_list_directory_vol(FAT32_Volume *vol, const char *path, FAT32_FileInfo *entries, int max_entries, int offset) {
     if (!vol || !vol->mounted) return 0;
     FAT32_FileHandle *dir_handle = realfs_open_from_vol(vol, path, "r");
     if (!dir_handle) return 0;
@@ -1443,6 +1443,7 @@ static int realfs_list_directory_vol(FAT32_Volume *vol, const char *path, FAT32_
     fat32_close_nolock(dir_handle);
     
     int count = 0;
+    int found_so_far = 0;
     uint8_t *cluster_buf = (uint8_t*)kmalloc(vol->sectors_per_cluster * 512);
     char *lfn_buffer = (char*)kmalloc(256);
     char *name = (char*)kmalloc(256);
@@ -1470,21 +1471,24 @@ static int realfs_list_directory_vol(FAT32_Volume *vol, const char *path, FAT32_
             }
             if (de[e].attributes & ATTR_VOLUME_ID) { has_lfn = false; continue; }
             
-            if (has_lfn && lfn_buffer[0] != 0) fs_strcpy(entries[count].name, lfn_buffer);
-            else {
-                int n = 0;
-                for (int k = 0; k < 8 && de[e].filename[k] != ' '; k++) entries[count].name[n++] = de[e].filename[k];
-                if (de[e].extension[0] != ' ') {
-                    entries[count].name[n++] = '.';
-                    for (int k = 0; k < 3 && de[e].extension[k] != ' '; k++) entries[count].name[n++] = de[e].extension[k];
+            if (found_so_far >= offset) {
+                if (has_lfn && lfn_buffer[0] != 0) fs_strcpy(entries[count].name, lfn_buffer);
+                else {
+                    int n = 0;
+                    for (int k = 0; k < 8 && de[e].filename[k] != ' '; k++) entries[count].name[n++] = de[e].filename[k];
+                    if (de[e].extension[0] != ' ') {
+                        entries[count].name[n++] = '.';
+                        for (int k = 0; k < 3 && de[e].extension[k] != ' '; k++) entries[count].name[n++] = de[e].extension[k];
+                    }
+                    entries[count].name[n] = 0;
                 }
-                entries[count].name[n] = 0;
+                entries[count].size = de[e].file_size;
+                entries[count].is_directory = (de[e].attributes & ATTR_DIRECTORY) != 0;
+                entries[count].start_cluster = (de[e].start_cluster_high << 16) | de[e].start_cluster_low;
+                count++;
             }
+            found_so_far++;
             has_lfn = false;
-            entries[count].size = de[e].file_size;
-            entries[count].is_directory = (de[e].attributes & ATTR_DIRECTORY) != 0;
-            entries[count].start_cluster = (de[e].start_cluster_high << 16) | de[e].start_cluster_low;
-            count++;
         }
         if (current_cluster < 0x0FFFFFF8) current_cluster = realfs_next_cluster(vol, current_cluster);
     }
@@ -1546,9 +1550,10 @@ static int vfs_ramfs_seek(void *fs_private, void *file_handle, int offset, int w
     return fat32_seek((FAT32_FileHandle*)file_handle, offset, whence);
 }
 
-static int vfs_ramfs_readdir(void *fs_private, const char *rel_path, vfs_dirent_t *entries, int max) {
+static int vfs_ramfs_readdir(void *fs_private, const char *rel_path, vfs_dirent_t *entries, int max, int offset) {
     (void)fs_private;
     int count = 0;
+    int found_so_far = 0;
     char *abs = (char*)kmalloc(FAT32_MAX_PATH);
     if (!abs) return 0;
     vfs_ramfs_get_abs_path(rel_path, abs);
@@ -1569,13 +1574,16 @@ static int vfs_ramfs_readdir(void *fs_private, const char *rel_path, vfs_dirent_
         }
         
         if (match) {
-            fs_strcpy(entries[count].name, n->filename);
-            entries[count].size = n->size;
-            entries[count].is_directory = (n->attributes & ATTR_DIRECTORY) ? 1 : 0;
-            entries[count].start_cluster = n->start_cluster;
-            entries[count].write_date = 0;
-            entries[count].write_time = 0;
-            count++;
+            if (found_so_far >= offset) {
+                fs_strcpy(entries[count].name, n->filename);
+                entries[count].size = n->size;
+                entries[count].is_directory = (n->attributes & ATTR_DIRECTORY) ? 1 : 0;
+                entries[count].start_cluster = n->start_cluster;
+                entries[count].write_date = 0;
+                entries[count].write_time = 0;
+                count++;
+            }
+            found_so_far++;
         }
     }
     spinlock_release_irqrestore(&ramfs_lock, rflags);
@@ -1809,13 +1817,13 @@ static int vfs_realfs_seek(void *fs_private, void *file_handle, int offset, int 
     return fat32_seek((FAT32_FileHandle*)file_handle, offset, whence);
 }
 
-static int vfs_realfs_readdir(void *fs_private, const char *rel_path, vfs_dirent_t *entries, int max) {
+static int vfs_realfs_readdir(void *fs_private, const char *rel_path, vfs_dirent_t *entries, int max, int offset) {
     FAT32_Volume *vol = (FAT32_Volume*)fs_private;
     uint64_t rflags = spinlock_acquire_irqsave(&vol->lock);
     FAT32_FileInfo *fat_entries = (FAT32_FileInfo*)kmalloc(max * sizeof(FAT32_FileInfo));
     if (!fat_entries) { spinlock_release_irqrestore(&vol->lock, rflags); return 0; }
     
-    int count = realfs_list_directory_vol((FAT32_Volume*)fs_private, rel_path, fat_entries, max);
+    int count = realfs_list_directory_vol((FAT32_Volume*)fs_private, rel_path, fat_entries, max, offset);
     for (int i = 0; i < count; i++) {
         fs_strcpy(entries[i].name, fat_entries[i].name);
         entries[i].size = fat_entries[i].size;
@@ -1858,7 +1866,7 @@ static bool vfs_realfs_rmdir(void *fs_private, const char *rel_path) {
     extern void fat32_close_nolock(FAT32_FileHandle *handle);
     fat32_close_nolock(fh);
 
-    if (is_dir && realfs_list_directory_vol(vol, rel_path, &child, 1) == 0) {
+    if (is_dir && realfs_list_directory_vol(vol, rel_path, &child, 1, 0) == 0) {
         ret = realfs_delete_from_vol(vol, rel_path);
     }
     spinlock_release_irqrestore(&vol->lock, rflags);
@@ -2653,7 +2661,7 @@ int fat32_list_directory(const char *path, FAT32_FileInfo *entries, int max_entr
         vfs_dirent_t *v_entries = (vfs_dirent_t*)kmalloc(sizeof(vfs_dirent_t) * max_entries);
         if (!v_entries) return 0;
         
-        int count = vfs_list_directory(path, v_entries, max_entries);
+        int count = vfs_list_directory(path, v_entries, max_entries, 0);
         for (int i = 0; i < count; i++) {
             fs_strcpy(entries[i].name, v_entries[i].name);
             entries[i].size = v_entries[i].size;
